@@ -5,7 +5,7 @@ package main
 
 import (
 	"sync"
-
+	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/ipc"
 	"github.com/google/syzkaller/prog"
 )
@@ -66,6 +66,44 @@ func newWorkQueue(procs int, needCandidates chan struct{}) *WorkQueue {
 		procs:          procs,
 		needCandidates: needCandidates,
 	}
+}
+
+func (wq *WorkQueue) PrintAll_debug() {
+    wq.mu.RLock()
+    defer wq.mu.RUnlock()
+    log.Logf(0, "WorkQueue info:")
+    log.Logf(0, "  triageCandidate: %d", len(wq.triageCandidate))
+    for i, item := range wq.triageCandidate {
+        if item == nil || item.p == nil {
+            log.Logf(0, "    [%d] <nil>", i)
+        } else {
+            log.Logf(0, "    [%d] prog: %d calls, flags: %v", i, len(item.p.Calls), item.flags)
+        }
+    }
+    log.Logf(0, "  candidate: %d", len(wq.candidate))
+    for i, item := range wq.candidate {
+        if item == nil || item.p == nil {
+            log.Logf(0, "    [%d] <nil>", i)
+        } else {
+            log.Logf(0, "    [%d] prog: %d calls, flags: %v", i, len(item.p.Calls), item.flags)
+        }
+    }
+    log.Logf(0, "  triage: %d", len(wq.triage))
+    for i, item := range wq.triage {
+        if item == nil || item.p == nil {
+            log.Logf(0, "    [%d] <nil>", i)
+        } else {
+            log.Logf(0, "    [%d] prog: %d calls, flags: %v", i, len(item.p.Calls), item.flags)
+        }
+    }
+    log.Logf(0, "  smash: %d", len(wq.smash))
+    for i, item := range wq.smash {
+        if item == nil || item.p == nil {
+            log.Logf(0, "    [%d] <nil>", i)
+        } else {
+            log.Logf(0, "    [%d] prog: %d calls", i, len(item.p.Calls))
+        }
+    }
 }
 
 func (wq *WorkQueue) enqueue(item interface{}) {

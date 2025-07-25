@@ -5,6 +5,8 @@ package prog
 
 import (
 	"math/rand"
+    "fmt"
+	"github.com/google/syzkaller/pkg/log"
 )
 
 // Generate generates a random program with ncalls calls.
@@ -32,4 +34,52 @@ func (target *Target) Generate(rs rand.Source, ncalls int, ct *ChoiceTable) *Pro
 	p.sanitizeFix()
 	p.debugValidate()
 	return p
+}
+
+
+func GenerateSeedFromSyscallPair_debug(target *Target, choiceTable *ChoiceTable, targetCall *Syscall, relateCall *Syscall, rnd *rand.Rand) (*Prog, error) {
+    if targetCall == nil || relateCall == nil {
+        return nil, fmt.Errorf("Invalid target or relate syscall")
+    }
+
+    p := &Prog{Target: target}
+    r := newRand(target, rnd)
+    s := newState(target, choiceTable, nil)
+
+	log.Logf(0, "Generating target syscall: \n%s", targetCall.Name)
+    calls := r.generateParticularCall(s, targetCall)
+    for _, c := range calls {
+        s.analyze(c)
+        p.Calls = append(p.Calls, c)
+    }
+
+	log.Logf(0, "Generating relate syscall: \n%s", relateCall.Name)
+    calls = r.generateParticularCall(s, relateCall)
+    for _, c := range calls {
+        s.analyze(c)
+        p.Calls = append(p.Calls, c)
+    }
+
+    for len(p.Calls) < RecommendedCalls {
+        calls = r.generateCall(s, p, len(p.Calls))
+        log.Logf(0, "Generated %d additional calls", len(calls))
+        for _, c := range calls {
+            s.analyze(c)
+            p.Calls = append(p.Calls, c)
+        }
+    }
+
+    log.Logf(0, "Seed length before RemoveCall: %d", len(p.Calls))
+    for len(p.Calls) > RecommendedCalls {
+        p.RemoveCall(RecommendedCalls - 1)
+    }
+    log.Logf(0, "Seed length after RemoveCall: %d", len(p.Calls))
+
+	log.Logf(0, "SanitizeFix and debugValidate ...")
+    p.sanitizeFix()
+    p.debugValidate()
+
+	log.Logf(0, "Final seed program:\n%s", p.Serialize())
+
+    return p, nil
 }

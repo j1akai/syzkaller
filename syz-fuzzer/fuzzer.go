@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"encoding/json"
+	stdlog "log"
 
 	"github.com/google/syzkaller/pkg/csource"
 	"github.com/google/syzkaller/pkg/hash"
@@ -134,6 +136,90 @@ func createIPCConfig(features *host.Features, config *ipc.Config) {
 	}
 }
 
+func generateSeedsFromJSON_debug(jsonPath string, choiceTable *prog.ChoiceTable, target *prog.Target) ([]*prog.Prog, error) {
+	log.Logf(0, "%s", choiceTable.PrintChoiceTable_debug())
+
+	if jsonPath == "" {
+        log.Logf(0, "FlagSyscallPair is empty")
+        return nil, nil
+    }
+    log.Logf(0, "FlagSyscallPair: %s", jsonPath)
+
+	data, err := os.ReadFile(jsonPath)
+    if err != nil {
+        return nil, fmt.Errorf("Failed to read JSON file: %v", err)
+    }
+
+    var dependencies []struct {
+        Target string   `json:"Target"`
+        Relate []string `json:"Relate"`
+    }
+    if err := json.Unmarshal(data, &dependencies); err != nil {
+        return nil, fmt.Errorf("Failed to parse JSON file: %v", err)
+    }
+
+    log.Logf(0, "Dependencies:")
+    for _, dep := range dependencies {
+        log.Logf(0, "Target: %s, Relate: %v", dep.Target, dep.Relate)
+    }
+
+    var seeds []*prog.Prog
+    rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
+    for _, dep := range dependencies {
+        targetCall := target.SyscallMap[dep.Target]
+        if targetCall == nil {
+            log.Logf(0, "Unknown target syscall: %v", dep.Target)
+            continue
+        }
+		if !choiceTable.Enabled(targetCall.ID) {
+    	    log.Logf(0, "Target syscall not enabled: %v [%v], skipping", dep.Target, targetCall.ID)
+    	    continue
+    	}
+        for _, relate := range dep.Relate {
+            relateCall := target.SyscallMap[relate]
+            if relateCall == nil {
+                log.Logf(0, "Unknown relate syscall: %v", relate)
+                continue
+            }
+        	if !choiceTable.Enabled(relateCall.ID) {
+        	    log.Logf(0, "Relate syscall not enabled: %v [%v], skipping", relate, relateCall.ID)
+        	    continue
+        	}
+            log.Logf(0, "Generating seed for \nTarget: %s, Relate: %s", dep.Target, relate)
+            p, err := prog.GenerateSeedFromSyscallPair_debug(target, choiceTable, targetCall, relateCall, rnd)
+            if err != nil {
+                log.Logf(0, "Failed to generate seed program for %v and %v: %v", dep.Target, relate, err)
+                continue
+            }
+
+			log.Logf(0, "Generated seed with %d calls", len(p.Calls))
+
+            seeds = append(seeds, p)
+        }
+    }
+
+	log.Logf(0, "Total seeds generated: %d", len(seeds))
+
+    return seeds, nil
+}
+
+func (fuzzer *Fuzzer) injectInitialSeeds_debug(syscallPairPath string) {
+    seeds, err := generateSeedsFromJSON_debug(syscallPairPath, fuzzer.choiceTable, fuzzer.target)
+    if err != nil {
+        log.Logf(0, "Failed to generate seeds from JSON: %v", err)
+        return
+    }
+	fuzzer.workQueue.PrintAll_debug()
+    for _, seed := range seeds {
+        fuzzer.workQueue.enqueue(&WorkCandidate{
+            p:     seed,
+            flags: ProgCandidate,
+        })
+    }
+	fuzzer.workQueue.PrintAll_debug()
+    log.Logf(0, "Generated %d seeds from JSON file", len(seeds))
+}
+
 // nolint: funlen
 func main() {
 	debug.SetGCPercent(50)
@@ -148,6 +234,7 @@ func main() {
 		flagTest     = flag.Bool("test", false, "enable image testing mode")      // used by syz-ci
 		flagRunTest  = flag.Bool("runtest", false, "enable program testing mode") // used by pkg/runtest
 		flagRawCover = flag.Bool("raw_cover", false, "fetch raw coverage")
+		flagSyscallPair = flag.String("syscallPair","","file with dependencies between syscalls")
 	)
 	defer tool.Init()()
 	outputType := parseOutputType(*flagOutput)
@@ -289,6 +376,17 @@ func main() {
 	if r.CoverFilterBitmap != nil {
 		fuzzer.execOpts.Flags |= ipc.FlagEnableCoverageFilter
 	}
+
+	logFile := "/home/debug/log"
+	file, err := os.Create(logFile)
+	if err != nil {
+	    log.Fatalf("Failed to create log file: %v", err)
+	}
+	defer file.Close()
+	stdlog.SetOutput(file)
+	
+	fuzzer.injectInitialSeeds_debug(*flagSyscallPair)
+
 
 	log.Logf(0, "starting %v fuzzer processes", *flagProcs)
 	for pid := 0; pid < *flagProcs; pid++ {
