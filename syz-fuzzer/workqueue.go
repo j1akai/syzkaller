@@ -68,6 +68,7 @@ func newWorkQueue(procs int, needCandidates chan struct{}) *WorkQueue {
 	}
 }
 
+// 打印工作队列,用于调试,检查是否真正把生成的初始候选种子加入到了候选队列中
 func (wq *WorkQueue) PrintAll_debug() {
     wq.mu.RLock()
     defer wq.mu.RUnlock()

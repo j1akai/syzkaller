@@ -38,6 +38,7 @@ func (p *Prog) Mutate(rs rand.Source, ncalls int, ct *ChoiceTable, corpus []*Pro
 	}
 	for stop, ok := false, false; !stop; stop = ok && len(p.Calls) != 0 && r.oneOf(3) {
 		switch {
+		// 五分之一的概率,利用依赖信息插入新系统调用
 		case r.oneOf(5):
 			ok = ctx.insertCallWithDependency_debug()
 		case r.oneOf(5):
@@ -71,7 +72,10 @@ type mutator struct {
 	corpus []*Prog      // The entire corpus, including original program p.
 }
 
+// 输入:老种子
+// 输出:新种子(包含具有依赖关系的系统调用对)
 func (ctx *mutator) insertCallWithDependency_debug() bool {
+	// 将日志持久化到文件
 	logFile := "/home/debug/insertCallWithDependency_debug.log"
 	file, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
@@ -80,12 +84,15 @@ func (ctx *mutator) insertCallWithDependency_debug() bool {
 	defer file.Close()
 	stdlog.SetOutput(file)
 
+	// 老种子长度不能超过预定义的最大种子长度,否则不变异
 	p, r := ctx.p, ctx.r
     if len(p.Calls) >= ctx.ncalls {
 		log.Logf(0, "[insertCallWithDependency_debug] Program already has max calls (%d), skip insert", ctx.ncalls)
         return false
     }
 	log.Logf(0, "[insertCallWithDependency_debug] Mutate begins, program now has %d calls", len(p.Calls))
+	
+	// 在老种子里随机选一个位置idx
     idx := r.biasedRand(len(p.Calls)+1, 5)
     var c *Call
     if idx < len(p.Calls) {
@@ -106,17 +113,22 @@ func (ctx *mutator) insertCallWithDependency_debug() bool {
         insertIdx int
     }
 
+	// 从idx开始往前遍历每一个syscall
     for i := idx - 1; i >= 0; i-- {
         call := p.Calls[i]
+		// 判断该syscall是不是target_syscall,如果不是,则继续往前遍历
         infos, ok := ctx.ct.SyscallPair[call.Meta]
         if !ok || len(infos) == 0 {
 			log.Logf(0, "[insertCallWithDependency_debug] Call #%d (%s) has no dependency pairs", i, call.Meta.Name)
             continue
         }
 		log.Logf(0, "[insertCallWithDependency_debug] Call #%d (%s) has %d dependency pairs", i, call.Meta.Name, len(infos))
+
+		// 遍历依赖于该syscall的relate_syscall
         for _, info := range infos {
             log.Logf(0, "[insertCallWithDependency_debug]   <Target: %s, Relate: %s> Verified=%v Freq=%d",
                 call.Meta.Name, info.Relate.Name, info.Verified, info.Freq)
+			// 看当前target和relate是否在corpus种子库中出现过,如果没出现过,则把relate插入到idx前面
             if !info.Verified {
                 log.Logf(0, "[insertCallWithDependency_debug]   --> Found unverified pair, inserting Relate: %s before idx %d", info.Relate.Name, idx)
                 calls := r.generateParticularCall(s, info.Relate)
@@ -127,6 +139,7 @@ func (ctx *mutator) insertCallWithDependency_debug() bool {
 				log.Logf(0, "[insertCallWithDependency_debug]   Inserted Relate: %s, program now has %d calls", info.Relate.Name, len(p.Calls))
                 return true
             }
+			// 记录系统调用对出现在种子库中次数最少的那一对
             if leastVerified == nil || info.Freq < leastVerified.freq {
                 leastVerified = &struct {
                     target *Syscall
@@ -138,6 +151,7 @@ func (ctx *mutator) insertCallWithDependency_debug() bool {
         }
     }
 
+	// 如果前面找到的<target,relate>都已经出现在种子库中,那么选取出现次数最少的那一对
     if leastVerified != nil {
 		log.Logf(0, "[insertCallWithDependency_debug] All dependency pairs verified, inserting least frequent pair: <Target: %s, Relate: %s> Freq=%d",
             leastVerified.target.Name, leastVerified.relate.Name, leastVerified.freq)
@@ -150,6 +164,7 @@ func (ctx *mutator) insertCallWithDependency_debug() bool {
         return true
     }
 
+	// 如果老种子中不存在target_syscall,那么酒随机挑选系统调用进行插入,此时不再利用依赖关系
     calls := r.generateCall(s, p, idx)
     p.insertBefore(c, calls)
     for len(p.Calls) > ctx.ncalls {

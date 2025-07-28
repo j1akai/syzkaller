@@ -5,6 +5,7 @@ import (
 	"bytes"
 )
 
+// 打印选择表中的信息(支持哪些系统调用以及系统调用间的优先级值)
 func (ct *ChoiceTable) PrintChoiceTable_debug() string {
     var buf bytes.Buffer
     buf.WriteString("ChoiceTable Debug Info:\n")

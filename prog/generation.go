@@ -36,7 +36,8 @@ func (target *Target) Generate(rs rand.Source, ncalls int, ct *ChoiceTable) *Pro
 	return p
 }
 
-
+// 输入:target_syscall和relate_syscall
+// 输出:包含target_syscall和relate_syscall的一个种子
 func GenerateSeedFromSyscallPair_debug(target *Target, choiceTable *ChoiceTable, targetCall *Syscall, relateCall *Syscall, rnd *rand.Rand) (*Prog, error) {
     if targetCall == nil || relateCall == nil {
         return nil, fmt.Errorf("Invalid target or relate syscall")
@@ -46,6 +47,7 @@ func GenerateSeedFromSyscallPair_debug(target *Target, choiceTable *ChoiceTable,
     r := newRand(target, rnd)
     s := newState(target, choiceTable, nil)
 
+    // 把target_syscall包含进种子
 	log.Logf(0, "Generating target syscall: \n%s", targetCall.Name)
     calls := r.generateParticularCall(s, targetCall)
     for _, c := range calls {
@@ -53,6 +55,7 @@ func GenerateSeedFromSyscallPair_debug(target *Target, choiceTable *ChoiceTable,
         p.Calls = append(p.Calls, c)
     }
 
+    // 把relate_syscall包含进种子
 	log.Logf(0, "Generating relate syscall: \n%s", relateCall.Name)
     calls = r.generateParticularCall(s, relateCall)
     for _, c := range calls {
@@ -60,6 +63,7 @@ func GenerateSeedFromSyscallPair_debug(target *Target, choiceTable *ChoiceTable,
         p.Calls = append(p.Calls, c)
     }
 
+    // 将包含了target_syscall和relate_syscall的种子进行扩大,即添加其他syscall,使其共包含20个syscall
     for len(p.Calls) < RecommendedCalls {
         calls = r.generateCall(s, p, len(p.Calls))
         log.Logf(0, "Generated %d additional calls", len(calls))
@@ -69,12 +73,14 @@ func GenerateSeedFromSyscallPair_debug(target *Target, choiceTable *ChoiceTable,
         }
     }
 
+    // 移除多余的syscall,种子长度最长为20
     log.Logf(0, "Seed length before RemoveCall: %d", len(p.Calls))
     for len(p.Calls) > RecommendedCalls {
         p.RemoveCall(RecommendedCalls - 1)
     }
     log.Logf(0, "Seed length after RemoveCall: %d", len(p.Calls))
 
+    // 检查语义及有效性
 	log.Logf(0, "SanitizeFix and debugValidate ...")
     p.sanitizeFix()
     p.debugValidate()

@@ -136,6 +136,8 @@ func createIPCConfig(features *host.Features, config *ipc.Config) {
 	}
 }
 
+// 输入:包含具有依赖信息的系统调用对的json文件
+// 输出:根据每个具有依赖关系的系统调用对生成一个种子
 func generateSeedsFromJSON_debug(jsonPath string, choiceTable *prog.ChoiceTable, target *prog.Target) ([]*prog.Prog, error) {
 	log.Logf(0, "%s", choiceTable.PrintChoiceTable_debug())
 
@@ -154,10 +156,12 @@ func generateSeedsFromJSON_debug(jsonPath string, choiceTable *prog.ChoiceTable,
         Target string   `json:"Target"`
         Relate []string `json:"Relate"`
     }
+	// 读取json文件,转换到内存中,存储在dependencies
     if err := json.Unmarshal(data, &dependencies); err != nil {
         return nil, fmt.Errorf("Failed to parse JSON file: %v", err)
     }
 
+	// 初始化ChoiceTable的SyscallPair字段(我们自定义的)
 	choiceTable.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo_debug)
     for _, dep := range dependencies {
         targetCall := target.SyscallMap[dep.Target]
@@ -200,6 +204,7 @@ func generateSeedsFromJSON_debug(jsonPath string, choiceTable *prog.ChoiceTable,
     var seeds []*prog.Prog
     rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
     for _, dep := range dependencies {
+		// 遍历dependencies,对每一对target_syscall和relate_syscall都调用GenerateSeedFromSyscallPair_debug来生成种子
         targetCall := target.SyscallMap[dep.Target]
         if targetCall == nil {
             log.Logf(0, "Unknown target syscall: %v", dep.Target)
@@ -237,6 +242,8 @@ func generateSeedsFromJSON_debug(jsonPath string, choiceTable *prog.ChoiceTable,
     return seeds, nil
 }
 
+// 在fuzzer端初始化ChoiceTable之后,利用静态分析得到的结果json文件
+// 生成初始种子,并加入到候选队列中,等待被执行
 func (fuzzer *Fuzzer) injectInitialSeeds_debug(syscallPairPath string) {
     seeds, err := generateSeedsFromJSON_debug(syscallPairPath, fuzzer.choiceTable, fuzzer.target)
     if err != nil {
@@ -268,6 +275,7 @@ func main() {
 		flagTest     = flag.Bool("test", false, "enable image testing mode")      // used by syz-ci
 		flagRunTest  = flag.Bool("runtest", false, "enable program testing mode") // used by pkg/runtest
 		flagRawCover = flag.Bool("raw_cover", false, "fetch raw coverage")
+		// 通过命令行参数接收json文件路径,和pkg/instance/instance.go中的更改相对应
 		flagSyscallPair = flag.String("syscallPair","","file with dependencies between syscalls")
 	)
 	defer tool.Init()()
@@ -411,6 +419,8 @@ func main() {
 		fuzzer.execOpts.Flags |= ipc.FlagEnableCoverageFilter
 	}
 
+	// *****************************
+	// 将打印信息持久化到文件中
 	logFile := "/home/debug/log"
 	file, err := os.Create(logFile)
 	if err != nil {
@@ -419,7 +429,9 @@ func main() {
 	defer file.Close()
 	stdlog.SetOutput(file)
 	
+	// 利用依赖信息生成候选种子
 	fuzzer.injectInitialSeeds_debug(*flagSyscallPair)
+	// *****************************
 
 
 	log.Logf(0, "starting %v fuzzer processes", *flagProcs)
@@ -644,6 +656,7 @@ func (fuzzer *FuzzerSnapshot) chooseProgram(r *rand.Rand) *prog.Prog {
 	return fuzzer.corpus[idx]
 }
 
+// 在种子加入到种子库之后,更新ChoiceTable的SyscallPair字段
 func (fuzzer *Fuzzer) addInputToCorpus(p *prog.Prog, sign signal.Signal, sig hash.Sig) {
 	fuzzer.corpusMu.Lock()
 	added := false
@@ -681,6 +694,7 @@ func (fuzzer *Fuzzer) addInputToCorpus(p *prog.Prog, sign signal.Signal, sig has
     }
     log.Logf(0, "====================")
 
+	// 查看当前种子是否包含<target_syscall,relate_syscall>,如果包含,则需要更新ChoiceTable.SyscallPair中的出现次数Freq信息
 	if added && fuzzer.choiceTable != nil && fuzzer.choiceTable.SyscallPair != nil {
         for i, call := range p.Calls {
             infos, ok := fuzzer.choiceTable.SyscallPair[call.Meta]

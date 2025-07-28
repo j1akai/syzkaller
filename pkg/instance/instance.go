@@ -463,6 +463,7 @@ func FuzzerCmd(args *FuzzerCmdArgs) string {
 		}
 		optionalArg = " " + tool.OptionalFlags(flags)
 	}
+	// manager启动fuzzer，在启动时增加一个命令行参数syscallPair，用于指定syscallpair.json的路径(guest)
 	return fmt.Sprintf("%v -executor=%v -name=%v -arch=%v%v -manager=%v -sandbox=%v"+
 		" -procs=%v -cover=%v -debug=%v -test=%v%v%v%v  -syscallPair=/home/syscallpair.json",
 		args.Fuzzer, args.Executor, args.Name, args.Arch, osArg, args.FwdAddr, args.Sandbox,
