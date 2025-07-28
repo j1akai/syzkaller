@@ -158,6 +158,40 @@ func generateSeedsFromJSON_debug(jsonPath string, choiceTable *prog.ChoiceTable,
         return nil, fmt.Errorf("Failed to parse JSON file: %v", err)
     }
 
+	choiceTable.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo_debug)
+    for _, dep := range dependencies {
+        targetCall := target.SyscallMap[dep.Target]
+        if targetCall == nil {
+            log.Logf(0, "Unknown target syscall: %v", dep.Target)
+            continue
+        }
+        var relateInfos []*prog.SyscallPairInfo_debug
+        for _, relate := range dep.Relate {
+            relateCall := target.SyscallMap[relate]
+            if relateCall == nil {
+                log.Logf(0, "Unknown relate syscall: %v", relate)
+                continue
+            }
+            relateInfos = append(relateInfos, &prog.SyscallPairInfo_debug{
+                Relate:   relateCall,
+                Verified: false,
+                Freq:     0,
+            })
+        }
+        if len(relateInfos) > 0 {
+            choiceTable.SyscallPair[targetCall] = relateInfos
+        }
+    }
+
+	log.Logf(0, "==== SyscallPair ====")
+	for target, relates := range choiceTable.SyscallPair {
+	    log.Logf(0, "Target: %s", target.Name)
+	    for _, info := range relates {
+	        log.Logf(0, "    Relate: %s, Verified: %v, Freq: %d", info.Relate.Name, info.Verified, info.Freq)
+	    }
+	}
+	log.Logf(0, "==== SyscallPair ====")
+
     log.Logf(0, "Dependencies:")
     for _, dep := range dependencies {
         log.Logf(0, "Target: %s, Relate: %v", dep.Target, dep.Relate)
@@ -612,6 +646,7 @@ func (fuzzer *FuzzerSnapshot) chooseProgram(r *rand.Rand) *prog.Prog {
 
 func (fuzzer *Fuzzer) addInputToCorpus(p *prog.Prog, sign signal.Signal, sig hash.Sig) {
 	fuzzer.corpusMu.Lock()
+	added := false
 	if _, ok := fuzzer.corpusHashes[sig]; !ok {
 		fuzzer.corpus = append(fuzzer.corpus, p)
 		fuzzer.corpusHashes[sig] = struct{}{}
@@ -621,6 +656,7 @@ func (fuzzer *Fuzzer) addInputToCorpus(p *prog.Prog, sign signal.Signal, sig has
 		}
 		fuzzer.sumPrios += prio
 		fuzzer.corpusPrios = append(fuzzer.corpusPrios, fuzzer.sumPrios)
+		added = true
 	}
 	fuzzer.corpusMu.Unlock()
 
@@ -630,6 +666,62 @@ func (fuzzer *Fuzzer) addInputToCorpus(p *prog.Prog, sign signal.Signal, sig has
 		fuzzer.maxSignal.Merge(sign)
 		fuzzer.signalMu.Unlock()
 	}
+
+	logFile := "/home/debug/addInputToCorpus.log"
+	file, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+	    log.Fatalf("Failed to open log file: %v", err)
+	}
+	defer file.Close()
+	stdlog.SetOutput(file)
+
+	log.Logf(0, "=== Program Calls ===")
+    for i, call := range p.Calls {
+        log.Logf(0, "Call #%d: %s", i, call.Meta.Name)
+    }
+    log.Logf(0, "====================")
+
+	if added && fuzzer.choiceTable != nil && fuzzer.choiceTable.SyscallPair != nil {
+        for i, call := range p.Calls {
+            infos, ok := fuzzer.choiceTable.SyscallPair[call.Meta]
+            if !ok || len(infos) == 0 {
+				log.Logf(0, "[addInputToCorpus] Target syscall %s not found in SyscallPair map", call.Meta.Name)
+                continue
+            }
+			if len(infos) == 0 {
+                log.Logf(0, "[addInputToCorpus] Target syscall %s found but has no relate syscalls", call.Meta.Name)
+                continue
+            }
+
+            log.Logf(0, "[addInputToCorpus] Checking relates for target %s (has %d relates)", call.Meta.Name, len(infos))
+			foundAnyRelate := false
+            for _, info := range infos {
+				foundCurrentRelate := false
+                for j := i + 1; j < len(p.Calls); j++ {
+                    if p.Calls[j].Meta == info.Relate {
+						foundCurrentRelate = true
+						foundAnyRelate = true
+                        wasVerified := info.Verified
+                        info.Verified = true
+                        info.Freq++
+                        if !wasVerified {
+                            log.Logf(0, "[addInputToCorpus] <Target: %s, Relate: %s> First time, set Verified=true", call.Meta.Name, info.Relate.Name)
+                        }
+                        log.Logf(0, "[addInputToCorpus] <Target: %s, Relate: %s> happens, Freq=%d", call.Meta.Name, info.Relate.Name, info.Freq)
+                        break
+                    }
+                } 
+				if !foundCurrentRelate {
+                    log.Logf(0, "[addInputToCorpus] Target %s has relate %s but not found in this program", 
+                        call.Meta.Name, info.Relate.Name)
+                }
+            }
+			if !foundAnyRelate {
+                log.Logf(0, "[addInputToCorpus] Target %s has %d relates but none found in this program", 
+                    call.Meta.Name, len(infos))
+            }
+        }
+    }
 }
 
 func (fuzzer *Fuzzer) snapshot() FuzzerSnapshot {

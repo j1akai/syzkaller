@@ -179,12 +179,19 @@ func normalizePrio(prios [][]int32) {
 	}
 }
 
+type SyscallPairInfo_debug struct {
+    Relate   *Syscall
+    Verified bool   // 是否在corpus中出现过
+    Freq     int    // 出现次数
+}
+
 // ChooseTable allows to do a weighted choice of a syscall for a given syscall
 // based on call-to-call priorities and a set of enabled syscalls.
 type ChoiceTable struct {
 	target *Target
 	runs   [][]int32
 	calls  []*Syscall
+	SyscallPair map[*Syscall][]*SyscallPairInfo_debug // Target_syscall -> Relate_syscalls信息
 }
 
 func (target *Target) BuildChoiceTable(corpus []*Prog, enabled map[*Syscall]bool) *ChoiceTable {
@@ -232,7 +239,7 @@ func (target *Target) BuildChoiceTable(corpus []*Prog, enabled map[*Syscall]bool
 			run[i][j] = sum
 		}
 	}
-	return &ChoiceTable{target, run, enabledCalls}
+	return &ChoiceTable{target, run, enabledCalls, make(map[*Syscall][]*SyscallPairInfo_debug)}
 }
 
 func (ct *ChoiceTable) Enabled(call int) bool {

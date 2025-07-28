@@ -9,6 +9,9 @@ import (
 	"math"
 	"math/rand"
 	"sort"
+	stdlog "log"
+	"github.com/google/syzkaller/pkg/log"
+	"os"
 )
 
 // Maximum length of generated binary blobs inserted into the program.
@@ -35,6 +38,8 @@ func (p *Prog) Mutate(rs rand.Source, ncalls int, ct *ChoiceTable, corpus []*Pro
 	}
 	for stop, ok := false, false; !stop; stop = ok && len(p.Calls) != 0 && r.oneOf(3) {
 		switch {
+		case r.oneOf(5):
+			ok = ctx.insertCallWithDependency_debug()
 		case r.oneOf(5):
 			// Not all calls have anything squashable,
 			// so this has lower priority in reality.
@@ -64,6 +69,94 @@ type mutator struct {
 	ncalls int          // The allowed maximum calls in mutated program.
 	ct     *ChoiceTable // ChoiceTable for syscalls.
 	corpus []*Prog      // The entire corpus, including original program p.
+}
+
+func (ctx *mutator) insertCallWithDependency_debug() bool {
+	logFile := "/home/debug/insertCallWithDependency_debug.log"
+	file, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+	    log.Fatalf("Failed to open log file: %v", err)
+	}
+	defer file.Close()
+	stdlog.SetOutput(file)
+
+	p, r := ctx.p, ctx.r
+    if len(p.Calls) >= ctx.ncalls {
+		log.Logf(0, "[insertCallWithDependency_debug] Program already has max calls (%d), skip insert", ctx.ncalls)
+        return false
+    }
+	log.Logf(0, "[insertCallWithDependency_debug] Mutate begins, program now has %d calls", len(p.Calls))
+    idx := r.biasedRand(len(p.Calls)+1, 5)
+    var c *Call
+    if idx < len(p.Calls) {
+        c = p.Calls[idx]
+    }
+	log.Logf(0, "[insertCallWithDependency_debug] Insert position: %d (before call: %v)", idx, func() string {
+        if c != nil {
+            return c.Meta.Name
+        }
+        return "END"
+    }())
+    s := analyze(ctx.ct, ctx.corpus, p, c)
+
+    var leastVerified *struct {
+        target *Syscall
+        relate *Syscall
+        freq   int
+        insertIdx int
+    }
+
+    for i := idx - 1; i >= 0; i-- {
+        call := p.Calls[i]
+        infos, ok := ctx.ct.SyscallPair[call.Meta]
+        if !ok || len(infos) == 0 {
+			log.Logf(0, "[insertCallWithDependency_debug] Call #%d (%s) has no dependency pairs", i, call.Meta.Name)
+            continue
+        }
+		log.Logf(0, "[insertCallWithDependency_debug] Call #%d (%s) has %d dependency pairs", i, call.Meta.Name, len(infos))
+        for _, info := range infos {
+            log.Logf(0, "[insertCallWithDependency_debug]   <Target: %s, Relate: %s> Verified=%v Freq=%d",
+                call.Meta.Name, info.Relate.Name, info.Verified, info.Freq)
+            if !info.Verified {
+                log.Logf(0, "[insertCallWithDependency_debug]   --> Found unverified pair, inserting Relate: %s before idx %d", info.Relate.Name, idx)
+                calls := r.generateParticularCall(s, info.Relate)
+                p.insertBefore(c, calls)
+                for len(p.Calls) > ctx.ncalls {
+                    p.RemoveCall(idx)
+                }
+				log.Logf(0, "[insertCallWithDependency_debug]   Inserted Relate: %s, program now has %d calls", info.Relate.Name, len(p.Calls))
+                return true
+            }
+            if leastVerified == nil || info.Freq < leastVerified.freq {
+                leastVerified = &struct {
+                    target *Syscall
+                    relate *Syscall
+                    freq   int
+                    insertIdx int
+                }{call.Meta, info.Relate, info.Freq, idx}
+            }
+        }
+    }
+
+    if leastVerified != nil {
+		log.Logf(0, "[insertCallWithDependency_debug] All dependency pairs verified, inserting least frequent pair: <Target: %s, Relate: %s> Freq=%d",
+            leastVerified.target.Name, leastVerified.relate.Name, leastVerified.freq)
+        calls := r.generateParticularCall(s, leastVerified.relate)
+        p.insertBefore(c, calls)
+        for len(p.Calls) > ctx.ncalls {
+            p.RemoveCall(idx)
+        }
+		log.Logf(0, "[insertCallWithDependency_debug] Inserted Relate: %s, program now has %d calls", leastVerified.relate.Name, len(p.Calls))
+        return true
+    }
+
+    calls := r.generateCall(s, p, idx)
+    p.insertBefore(c, calls)
+    for len(p.Calls) > ctx.ncalls {
+        p.RemoveCall(idx)
+    }
+	log.Logf(0, "[insertCallWithDependency_debug] Normal call inserted, program now has %d calls", len(p.Calls))
+    return true
 }
 
 // This function selects a random other program p0 out of the corpus, and
