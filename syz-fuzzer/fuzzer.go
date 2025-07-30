@@ -421,7 +421,7 @@ func main() {
 
 	// *****************************
 	// 将打印信息持久化到文件中
-	logFile := "/home/debug/log"
+	logFile := "/home/debug/fuzzer_main.log"
 	file, err := os.Create(logFile)
 	if err != nil {
 	    log.Fatalf("Failed to create log file: %v", err)

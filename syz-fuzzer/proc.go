@@ -12,6 +12,9 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+	// stdlog "log"
+	// "os/exec"
+	// "strings"
 
 	"github.com/google/syzkaller/pkg/cover"
 	"github.com/google/syzkaller/pkg/hash"
@@ -100,6 +103,27 @@ func (proc *Proc) loop() {
 }
 
 func (proc *Proc) triageInput(item *WorkTriage) {
+	// 这块日志打印目前还有问题，会存在多个triage任务日志写在同一个文件内
+	// logFile := fmt.Sprintf("/home/debug/triageInput_%d.log", proc.pid)
+	// logFile := fmt.Sprintf("/home/debug/triageInput_%d_%d.log", proc.pid, time.Now().UnixNano())
+	logFile := fmt.Sprintf("/home/debug/triageInput_%d_%x.log", 
+        proc.pid, hash.Hash(item.p.Serialize()))
+	prog.InitLogFile_debug(logFile)
+
+	// 开始时打印种子所有系统调用
+    log.Logf(0, "[triage] Initial program syscalls:")
+    for i, call := range item.p.Calls {
+        log.Logf(0, "  #%d: %s", i, call.Meta.Name)
+    }
+
+	// 打印触发新路径的系统调用
+    if item.call == -1 {
+        log.Logf(0, "[triage] Extra triggered new signal")
+    } else {
+        log.Logf(0, "[triage] Call #%d %s triggered new signal", item.call, item.p.Calls[item.call].Meta.Name)
+		log.Logf(0, "    signal: %v", item.info.Signal)
+    }
+
 	log.Logf(1, "#%v: triaging type=%x", proc.pid, item.flags)
 
 	prio := signalPrio(item.p, &item.info, item.call)
@@ -128,12 +152,22 @@ func (proc *Proc) triageInput(item *WorkTriage) {
 		if !reexecutionSuccess(info, &item.info, item.call) {
 			// The call was not executed or failed.
 			notexecuted++
+        	log.Logf(0, "  #%03d: execution failed | call:%s | failures:%d/%d", 
+        	    i, item.p.Calls[item.call].Meta.Name, notexecuted, signalRuns)
 			if notexecuted > signalRuns/2+1 {
+				log.Logf(0, "  #%03d: ABORTING | too many failures (%d > %d)", 
+                	i, notexecuted, signalRuns/2+1)
 				return // if happens too often, give up
 			}
 			continue
 		}
 		thisSignal, thisCover := getSignalAndCover(item.p, info, item.call)
+		log.Logf(0, "[triage] Run #%d - Per-call coverage:", i)
+    	for callIdx, call := range item.p.Calls {
+    	    callCover := info.Calls[callIdx].Cover
+    	    log.Logf(0, "  Call #%d %s: coverage=%d PCs: %v", 
+    	        callIdx, call.Meta.Name, len(callCover), callCover)
+    	}
 		if len(rawCover) == 0 && proc.fuzzer.fetchRawCover {
 			rawCover = append([]uint32{}, thisCover...)
 		}
@@ -141,10 +175,20 @@ func (proc *Proc) triageInput(item *WorkTriage) {
 		// Without !minimized check manager starts losing some considerable amount
 		// of coverage after each restart. Mechanics of this are not completely clear.
 		if newSignal.Empty() && item.flags&ProgMinimized == 0 {
+			log.Logf(0, "  #%03d: EARLY EXIT | empty signal & non-minimized prog | call:%s", 
+            	i, item.p.Calls[item.call].Meta.Name)
 			return
 		}
 		inputCover.Merge(thisCover)
+		log.Logf(0, "  #%03d: success | call:%s | signal:%d | coverage:%d", 
+        	i, item.p.Calls[item.call].Meta.Name, thisSignal.Len(), len(thisCover))
 	}
+	// 稳定性测试后打印
+    log.Logf(0, "[triage] After stable_test, program syscalls:")
+    for i, call := range item.p.Calls {
+        log.Logf(0, "  #%d: %s", i, call.Meta.Name)
+    }
+
 	if item.flags&ProgMinimized == 0 {
 		item.p, item.call = prog.Minimize(item.p, item.call, false,
 			func(p1 *prog.Prog, call1 int) bool {
@@ -163,10 +207,22 @@ func (proc *Proc) triageInput(item *WorkTriage) {
 			})
 	}
 
+	// 最小化后打印
+    log.Logf(0, "[triage] After minimization, program syscalls:")
+    for i, call := range item.p.Calls {
+        log.Logf(0, "  #%d: %s", i, call.Meta.Name)
+    }
+
 	data := item.p.Serialize()
 	sig := hash.Hash(data)
 
 	log.Logf(2, "added new input for %v to corpus:\n%s", logCallName, data)
+
+	log.Logf(0, "InputCover (%d unique PCs): %v", 
+    len(inputCover), inputCover.Serialize())
+	log.Logf(0, "inputSignal (%d unique Signals): %v", 
+    len(inputSignal), inputSignal.Serialize())
+
 	proc.fuzzer.sendInputToManager(rpctype.Input{
 		Call:     callName,
 		CallID:   item.call,
@@ -252,11 +308,59 @@ func (proc *Proc) executeHintSeed(p *prog.Prog, call int) {
 }
 
 func (proc *Proc) execute(execOpts *ipc.ExecOpts, p *prog.Prog, flags ProgTypes, stat Stat) *ipc.ProgInfo {
+	logFile := fmt.Sprintf("/home/debug/execute_%d_%x.log", 
+        proc.pid, hash.Hash(p.Serialize()))
+	prog.InitLogFile_debug(logFile)
+
+	execOpts.Flags |= ipc.FlagCollectCover  // 启用覆盖率收集
 	info := proc.executeRaw(execOpts, p, stat)
 	if info == nil {
 		return nil
 	}
 	calls, extra := proc.fuzzer.checkNewSignal(p, info)
+
+	if execOpts != nil {
+        log.Logf(0, "[execute] ExecOpts.Flags: %b (binary)", execOpts.Flags)
+        // 或者打印十六进制
+        log.Logf(0, "[execute] ExecOpts.Flags: 0x%x (hex)", execOpts.Flags)
+        
+        // 详细打印每个标志位是否设置
+        log.Logf(0, "[execute] ExecOpts flags details:")
+        log.Logf(0, "  FlagCollectSignal: %v", execOpts.Flags&ipc.FlagCollectSignal != 0)
+        log.Logf(0, "  FlagCollectCover: %v", execOpts.Flags&ipc.FlagCollectCover != 0)
+        log.Logf(0, "  FlagDedupCover: %v", execOpts.Flags&ipc.FlagDedupCover != 0)
+        log.Logf(0, "  FlagCollectComps: %v", execOpts.Flags&ipc.FlagCollectComps != 0)
+        log.Logf(0, "  FlagThreaded: %v", execOpts.Flags&ipc.FlagThreaded != 0)
+        log.Logf(0, "  FlagEnableCoverageFilter: %v", execOpts.Flags&ipc.FlagEnableCoverageFilter != 0)
+    } else {
+        log.Logf(0, "[execute] ExecOpts is nil")
+    }
+
+	// 打印当前种子包含哪些系统调用
+    log.Logf(0, "[execute] Program syscalls:")
+    for i, call := range p.Calls {
+        log.Logf(0, "  #%d: %s", i, call.Meta.Name)
+    }
+
+	// 打印每个系统调用触发了哪些路径（signal）
+    for i, inf := range info.Calls {
+        log.Logf(0, "  Call #%d %s triggered signal: %v", i, p.Calls[i].Meta.Name, inf.Signal)
+		log.Logf(0, "  Call #%d %s triggered cover: %v", i, p.Calls[i].Meta.Name, inf.Cover)
+    }
+    log.Logf(0, "  Extra triggered signal: %v", info.Extra.Signal)
+	log.Logf(0, "  Extra triggered cover: %v", info.Extra.Cover)
+
+    log.Logf(0, "[execute] Calls triggered new signal: %v", calls)
+    if extra {
+        log.Logf(0, "[execute] Extra triggered new signal")
+    }
+    for _, callIndex := range calls {
+        log.Logf(0, "  Call #%d %s triggered new signal: %v", callIndex, p.Calls[callIndex].Meta.Name, info.Calls[callIndex].Signal)
+    }
+    if extra {
+        log.Logf(0, "  Extra triggered new signal: %v", info.Extra.Signal)
+    }
+
 	for _, callIndex := range calls {
 		proc.enqueueCallTriage(p, flags, callIndex, info.Calls[callIndex])
 	}
@@ -319,6 +423,20 @@ func (proc *Proc) executeRaw(opts *ipc.ExecOpts, p *prog.Prog, stat Stat) *ipc.P
 	for try := 0; ; try++ {
 		atomic.AddUint64(&proc.fuzzer.stats[stat], 1)
 		output, info, hanged, err := proc.env.Exec(opts, p)
+
+		log.Logf(0, "[executeRaw] Exec returned values:")
+		log.Logf(0, "  output: %s", output)
+		log.Logf(0, "  hanged: %v", hanged)
+		log.Logf(0, "  err: %v", err)
+		if info != nil {
+			log.Logf(0, "  info.Calls: %d calls", len(info.Calls))
+			for i, callInfo := range info.Calls {
+				log.Logf(0, "    Call #%d: Signal=%v, Cover=%v", i, callInfo.Signal, callInfo.Cover)
+			}
+			log.Logf(0, "  info.Extra: Signal=%v, Cover=%v", info.Extra.Signal, info.Extra.Cover)
+		} else {
+			log.Logf(0, "  info: nil")
+		}
 		if err != nil {
 			if err == prog.ErrExecBufferTooSmall {
 				// It's bad if we systematically fail to serialize programs,

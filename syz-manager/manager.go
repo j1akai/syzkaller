@@ -1270,6 +1270,13 @@ func (mgr *Manager) machineChecked(a *rpctype.CheckArgs, enabledSyscalls map[*pr
 	mgr.firstConnect = time.Now()
 }
 
+func printCover_debug(cover []uint32) {
+    log.Logf(0, "Coverage data (%d PCs):\n", len(cover))
+    for _, pc := range cover {
+		log.Logf(0, "0x%x\n", pc)
+    }
+}
+
 func (mgr *Manager) newInput(inp rpctype.Input, sign signal.Signal) bool {
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
@@ -1289,6 +1296,7 @@ func (mgr *Manager) newInput(inp rpctype.Input, sign signal.Signal) bool {
 		cov.Merge(old.Cover)
 		cov.Merge(inp.Cover)
 		old.Cover = cov.Serialize()
+		// printCover_debug(old.Cover)
 		const maxUpdates = 32
 		old.Updates = append(old.Updates, update)
 		if len(old.Updates) > maxUpdates {

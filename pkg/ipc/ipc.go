@@ -15,12 +15,15 @@ import (
 	"sync/atomic"
 	"time"
 	"unsafe"
+	"sync"
 
 	"github.com/google/syzkaller/pkg/cover"
 	"github.com/google/syzkaller/pkg/osutil"
 	"github.com/google/syzkaller/pkg/signal"
 	"github.com/google/syzkaller/prog"
 	"github.com/google/syzkaller/sys/targets"
+	"github.com/google/syzkaller/pkg/log"
+	// "github.com/google/syzkaller/pkg/hash"
 )
 
 // Configuration flags for Config.Flags.
@@ -323,12 +326,67 @@ func addFallbackSignal(p *prog.Prog, info *ProgInfo) {
 	}
 }
 
+// addr2line 相关全局缓存和解析函数
+// 使用 addr2line 解析内核符号有以下限制：
+// 1. 内存要求：qemu 虚拟机需要分配足够内存（至少4GB），因为：
+//    - 每个 addr2line 进程会加载完整的 vmlinux 符号表
+//    - 高并发时多个 addr2line 进程会占用大量内存
+// 2. 性能问题：解析速度较慢，原因包括：
+//    - 需要加载和解析大型 ELF 文件
+//    - 频繁的进程创建/销毁开销
+// 3. 当前实现尚有问题，后期需要调试
+//	  - 考虑把<addr, line>这样的键值对存在本地文件
+//    - 问题：一个内核版本对应一个这样的文件
+var (
+    addrCache = struct {
+        sync.RWMutex
+        m map[uint32]string
+    }{m: make(map[uint32]string)}
+    
+    cacheHits  uint64
+    cacheMisses uint64
+)
+
+// resolveAddr 解析内核地址到源代码位置
+// 该函数是性能瓶颈，特别是在以下情况：
+// - 首次运行时的冷缓存阶段
+// - 处理新代码路径时的大量新地址
+// - 虚拟机内存不足导致进程被OOM killer终止
+func resolveAddr(addr uint32) string {
+    // 先尝试读缓存
+    addrCache.RLock()
+    if loc, ok := addrCache.m[addr]; ok {
+        addrCache.RUnlock()
+        atomic.AddUint64(&cacheHits, 1)
+        return loc
+    }
+    addrCache.RUnlock()
+
+    // 缓存未命中，执行 addr2line
+    fullAddr := fmt.Sprintf("0xffffffff%08x", addr)
+    cmd := exec.Command("addr2line", "-e", "/home/vmlinux", fullAddr)
+    output, err := cmd.CombinedOutput()
+    if err != nil {
+        return fmt.Sprintf("[addr2line error: %v]", err)
+    }
+    loc := strings.TrimSpace(string(output))
+
+    // 写入缓存
+    addrCache.Lock()
+    addrCache.m[addr] = loc
+    addrCache.Unlock()
+    
+    atomic.AddUint64(&cacheMisses, 1)
+    return loc
+}
+
 func (env *Env) parseOutput(p *prog.Prog, opts *ExecOpts) (*ProgInfo, error) {
 	out := env.out
 	ncmd, ok := readUint32(&out)
 	if !ok {
 		return nil, fmt.Errorf("failed to read number of calls")
 	}
+	log.Logf(0, "[parseOutput] Number of calls (ncmd): %d", ncmd)
 	info := &ProgInfo{Calls: make([]CallInfo, len(p.Calls))}
 	extraParts := make([]CallInfo, 0)
 	for i := uint32(0); i < ncmd; i++ {
@@ -354,24 +412,50 @@ func (env *Env) parseOutput(p *prog.Prog, opts *ExecOpts) (*ProgInfo, error) {
 			}
 			inf.Errno = int(reply.errno)
 			inf.Flags = CallFlags(reply.flags)
+			log.Logf(0, "[parseOutput] Call #%d (%s):", reply.index, p.Calls[reply.index].Meta.Name)
+            log.Logf(0, "  Flags: %v", CallFlags(reply.flags))
+            log.Logf(0, "  Errno: %v", reply.errno)
 		} else {
 			extraParts = append(extraParts, CallInfo{})
 			inf = &extraParts[len(extraParts)-1]
+			log.Logf(0, "[parseOutput] Extra Call:")
 		}
 		if inf.Signal, ok = readUint32Array(&out, reply.signalSize); !ok {
 			return nil, fmt.Errorf("call %v/%v/%v: signal overflow: %v/%v",
 				i, reply.index, reply.num, reply.signalSize, len(out))
 		}
+		log.Logf(0, "  Signal (%d elements): %v", len(inf.Signal), inf.Signal)
 		if inf.Cover, ok = readUint32Array(&out, reply.coverSize); !ok {
 			return nil, fmt.Errorf("call %v/%v/%v: cover overflow: %v/%v",
 				i, reply.index, reply.num, reply.coverSize, len(out))
 		}
+		log.Logf(0, "  Cover (%d elements): %v", len(inf.Cover), inf.Cover)
+		log.Logf(0, "  Cover details:")
+        for _, addr := range inf.Cover {
+            hexAddr := fmt.Sprintf("0xffffffff%08x", addr)
+            location := resolveAddr(addr)
+            log.Logf(0, "    %d (%s) -> %s", addr, hexAddr, location)
+        }
+		if cacheHits > 0 || cacheMisses > 0 {
+        	hitRate := float64(cacheHits) / float64(cacheHits+cacheMisses) * 100
+        	log.Logf(1, "addr2line cache stats: hits=%d, misses=%d, hit rate=%.2f%%", 
+        	    cacheHits, cacheMisses, hitRate)
+    	}
 		comps, err := readComps(&out, reply.compsSize)
 		if err != nil {
 			return nil, err
 		}
 		inf.Comps = comps
+		log.Logf(0, "  Comps (%d elements): %v", len(inf.Comps), inf.Comps)
 	}
+	if len(extraParts) > 0 {
+        info.Extra = convertExtra(extraParts, opts.Flags&FlagDedupCover > 0)
+        log.Logf(0, "[parseOutput] Extra (merged):")
+        log.Logf(0, "  Signal (%d elements): %v", len(info.Extra.Signal), info.Extra.Signal)
+        log.Logf(0, "  Cover (%d elements): %v", len(info.Extra.Cover), info.Extra.Cover)
+    } else {
+        log.Logf(0, "[parseOutput] No Extra data")
+    }
 	if len(extraParts) == 0 {
 		return info, nil
 	}

@@ -159,43 +159,139 @@ func (ctx *Context) run(pid int) {
 }
 
 func (ctx *Context) execute(pid int, env *ipc.Env, p *prog.Prog) {
-	// Limit concurrency window.
-	ticket := ctx.gate.Enter()
-	defer ctx.gate.Leave(ticket)
+    // Limit concurrency window.
+    ticket := ctx.gate.Enter()
+    defer ctx.gate.Leave(ticket)
 
-	callOpts := ctx.execOpts
-	if *flagOutput {
-		ctx.logProgram(pid, p, callOpts)
-	}
-	// This mimics the syz-fuzzer logic. This is important for reproduction.
-	for try := 0; ; try++ {
-		output, info, hanged, err := env.Exec(callOpts, p)
-		if err != nil && err != prog.ErrExecBufferTooSmall {
-			if try > 10 {
-				log.Fatalf("executor failed %v times: %v\n%s", try, err, output)
-			}
-			// Don't print err/output in this case as it may contain "SYZFAIL" and we want to fail yet.
-			log.Logf(1, "executor failed, retrying")
-			time.Sleep(time.Second)
-			continue
-		}
-		if ctx.config.Flags&ipc.FlagDebug != 0 || err != nil {
-			log.Logf(0, "result: hanged=%v err=%v\n\n%s", hanged, err, output)
-		}
-		if info != nil {
-			ctx.printCallResults(info)
-			if *flagHints {
-				ctx.printHints(p, info)
-			}
-			if *flagCoverFile != "" {
-				ctx.dumpCoverage(*flagCoverFile, info)
-			}
-		} else {
-			log.Logf(1, "RESULT: no calls executed")
-		}
-		break
-	}
+    // 新增：创建日志文件（每个进程单独文件）
+    logFile := fmt.Sprintf("/home/jiakai/debug/exec_%d.log", pid)
+    f, err := os.OpenFile(logFile, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0644)
+    if err != nil {
+        log.Fatalf("failed to create log file: %v", err)
+    }
+    defer f.Close()
+
+    // 新增：写入执行开始信息
+    fmt.Fprintf(f, "===== Start Execution [PID %d] %v =====\n", pid, time.Now().Format(time.RFC3339))
+    defer fmt.Fprintf(f, "===== End Execution [PID %d] %v =====\n\n", pid, time.Now().Format(time.RFC3339))
+
+    callOpts := ctx.execOpts
+    if *flagOutput {
+        ctx.logProgram(pid, p, callOpts)
+        // 新增：同时写入文件
+        fmt.Fprintf(f, "Program:\n%s\n", p.Serialize())
+    }
+
+    // This mimics the syz-fuzzer logic. This is important for reproduction.
+    for try := 0; ; try++ {
+        output, info, hanged, err := env.Exec(callOpts, p)
+        if err != nil && err != prog.ErrExecBufferTooSmall {
+            if try > 10 {
+                // 新增：错误信息写入文件
+                fmt.Fprintf(f, "FATAL ERROR after %d tries: %v\nOutput:\n%s\n", try, err, output)
+                log.Fatalf("executor failed %v times: %v\n%s", try, err, output)
+            }
+            // 新增：重试信息写入文件
+            fmt.Fprintf(f, "Executor failed (try %d), retrying...\n", try)
+            log.Logf(1, "executor failed, retrying")
+            time.Sleep(time.Second)
+            continue
+        }
+
+        // 保留原有stdout输出
+        if ctx.config.Flags&ipc.FlagDebug != 0 || err != nil {
+            log.Logf(0, "result: hanged=%v err=%v\n\n%s", hanged, err, output)
+            // 新增：结果写入文件
+            fmt.Fprintf(f, "Result: hanged=%v err=%v\nOutput:\n%s\n", hanged, err, output)
+        }
+
+        if info != nil {
+            // 保留原有stdout输出
+    		ctx.printCallResults(info)
+    		// 新增：详细信息写入文件
+    		fmt.Fprintf(f, "Detailed Results:\n")
+    		for callIdx, inf := range info.Calls {
+    		    flags := ""
+    		    if inf.Flags&ipc.CallFinished == 0 {
+    		        flags += " unfinished"
+    		    }
+    		    if inf.Flags&ipc.CallBlocked != 0 {
+    		        flags += " blocked"
+    		    }
+    		    if inf.Flags&ipc.CallFaultInjected != 0 {
+    		        flags += " faulted"
+    		    }
+    		    fmt.Fprintf(f, "Call %d: signal=%d cover=%d errno=%v flags=%v\n", 
+    		        callIdx, len(inf.Signal), len(inf.Cover), inf.Errno, flags)
+    		}
+		
+    		if *flagHints {
+    		    ctx.printHints(p, info)
+    		    // 新增：hints写入文件
+    		    fmt.Fprintf(f, "Hints Generation Data:\n")
+    		    for callIdx, callInfo := range info.Calls {
+    		        if callInfo.Comps != nil {
+    		            fmt.Fprintf(f, "Call %d Comps:\n", callIdx)
+    		            for val, args := range callInfo.Comps {
+    		                fmt.Fprintf(f, "  Val 0x%x:", val)
+    		                for arg := range args {
+    		                    fmt.Fprintf(f, " 0x%x", arg)
+    		                }
+    		                fmt.Fprintf(f, "\n")
+    		            }
+    		        }
+    		    }
+    		}
+    		if *flagCoverFile != "" {
+    		    ctx.dumpCoverage(*flagCoverFile, info)
+    		    // 新增：覆盖率信息写入文件
+    		    fmt.Fprintf(f, "Coverage Data Saved to: %s\n", *flagCoverFile)
+    		}
+        } else {
+            log.Logf(1, "RESULT: no calls executed")
+            fmt.Fprintf(f, "RESULT: no calls executed\n")
+        }
+        break
+    }
 }
+// func (ctx *Context) execute(pid int, env *ipc.Env, p *prog.Prog) {
+// 	// Limit concurrency window.
+// 	ticket := ctx.gate.Enter()
+// 	defer ctx.gate.Leave(ticket)
+
+// 	callOpts := ctx.execOpts
+// 	if *flagOutput {
+// 		ctx.logProgram(pid, p, callOpts)
+// 	}
+// 	// This mimics the syz-fuzzer logic. This is important for reproduction.
+// 	for try := 0; ; try++ {
+// 		output, info, hanged, err := env.Exec(callOpts, p)
+// 		if err != nil && err != prog.ErrExecBufferTooSmall {
+// 			if try > 10 {
+// 				log.Fatalf("executor failed %v times: %v\n%s", try, err, output)
+// 			}
+// 			// Don't print err/output in this case as it may contain "SYZFAIL" and we want to fail yet.
+// 			log.Logf(1, "executor failed, retrying")
+// 			time.Sleep(time.Second)
+// 			continue
+// 		}
+// 		if ctx.config.Flags&ipc.FlagDebug != 0 || err != nil {
+// 			log.Logf(0, "result: hanged=%v err=%v\n\n%s", hanged, err, output)
+// 		}
+// 		if info != nil {
+// 			ctx.printCallResults(info)
+// 			if *flagHints {
+// 				ctx.printHints(p, info)
+// 			}
+// 			if *flagCoverFile != "" {
+// 				ctx.dumpCoverage(*flagCoverFile, info)
+// 			}
+// 		} else {
+// 			log.Logf(1, "RESULT: no calls executed")
+// 		}
+// 		break
+// 	}
+// }
 
 func (ctx *Context) logProgram(pid int, p *prog.Prog, callOpts *ipc.ExecOpts) {
 	data := p.Serialize()
