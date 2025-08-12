@@ -106,7 +106,7 @@ func (ctx *mutator) insertCallWithDependency_debug() bool {
     }())
     s := analyze(ctx.ct, ctx.corpus, p, c)
 
-    var leastVerified *struct {
+    var mostVerified *struct {
         target *Syscall
         relate *Syscall
         freq   int
@@ -139,9 +139,9 @@ func (ctx *mutator) insertCallWithDependency_debug() bool {
 				log.Logf(0, "[insertCallWithDependency_debug]   Inserted Relate: %s, program now has %d calls", info.Relate.Name, len(p.Calls))
                 return true
             }
-			// 记录系统调用对出现在种子库中次数最少的那一对
-            if leastVerified == nil || info.Freq < leastVerified.freq {
-                leastVerified = &struct {
+			// 记录系统调用对出现在种子库中次数最多的那一对
+            if mostVerified == nil || info.Freq > mostVerified.freq {
+                mostVerified = &struct {
                     target *Syscall
                     relate *Syscall
                     freq   int
@@ -151,16 +151,16 @@ func (ctx *mutator) insertCallWithDependency_debug() bool {
         }
     }
 
-	// 如果前面找到的<target,relate>都已经出现在种子库中,那么选取出现次数最少的那一对
-    if leastVerified != nil {
-		log.Logf(0, "[insertCallWithDependency_debug] All dependency pairs verified, inserting least frequent pair: <Target: %s, Relate: %s> Freq=%d",
-            leastVerified.target.Name, leastVerified.relate.Name, leastVerified.freq)
-        calls := r.generateParticularCall(s, leastVerified.relate)
+	// 如果前面找到的<target,relate>都已经出现在种子库中,那么选取出现次数最多的那一对
+    if mostVerified != nil {
+		log.Logf(0, "[insertCallWithDependency_debug] All dependency pairs verified, inserting most frequent pair: <Target: %s, Relate: %s> Freq=%d",
+            mostVerified.target.Name, mostVerified.relate.Name, mostVerified.freq)
+        calls := r.generateParticularCall(s, mostVerified.relate)
         p.insertBefore(c, calls)
         for len(p.Calls) > ctx.ncalls {
             p.RemoveCall(idx)
         }
-		log.Logf(0, "[insertCallWithDependency_debug] Inserted Relate: %s, program now has %d calls", leastVerified.relate.Name, len(p.Calls))
+		log.Logf(0, "[insertCallWithDependency_debug] Inserted Relate: %s, program now has %d calls", mostVerified.relate.Name, len(p.Calls))
         return true
     }
 

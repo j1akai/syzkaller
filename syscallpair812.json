@@ -1,0 +1,40 @@
+[
+    {
+        "Target": "vfork",
+        "Relate": [
+            "fcntl",
+            "fcntl$F_GET_RW_HINT",
+            "fcntl$F_SET_RW_HINT",
+            "fcntl$dupfd",
+            "fcntl$getflags",
+            "fcntl$setsig",
+            "ioctl$SNAPSHOT_S2RAM",
+            "iopl",
+            "kexec_load",
+            "open",
+            "perf_event_open"
+        ],
+        "Source": "arch/x86/events/amd/ibs.c",
+        "Line": 337
+    },
+    {
+        "Target": "perf_event_open",
+        "Relate": [
+            "fcntl$dupfd",
+            "fcntl$getflags",
+            "fcntl$getown",
+            "fcntl$getownex",
+            "fcntl$lock",
+            "fcntl$setownex",
+            "fcntl$setpipe",
+            "fcntl$setsig",
+            "ioctl$SNAPSHOT_S2RAM",
+            "iopl",
+            "kexec_load",
+            "open",
+            "perf_event_open"
+        ],
+        "Source": "arch/x86/events/amd/ibs.c",
+        "Line": 337
+    }
+]

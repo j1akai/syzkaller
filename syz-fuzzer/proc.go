@@ -176,7 +176,7 @@ func (proc *Proc) triageInput(item *WorkTriage) {
 		RawCover: rawCover,
 	})
 
-	proc.fuzzer.addInputToCorpus(item.p, inputSignal, sig)
+	proc.fuzzer.addInputToCorpus(item.p, inputSignal, sig, inputCover.Serialize())
 
 	if item.flags&ProgSmashed == 0 {
 		proc.fuzzer.workQueue.enqueue(&WorkSmash{item.p, item.call})

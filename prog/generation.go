@@ -68,6 +68,22 @@ func GenerateSeedFromSyscallPair_debug(target *Target, choiceTable *ChoiceTable,
     p.sanitizeFix()
     p.debugValidate()
 
+    // 打印依据的target、relate、source和line
+    var source string
+    var line int
+    if choiceTable != nil && targetCall != nil {
+        if infos, ok := choiceTable.SyscallPair[targetCall]; ok {
+            for _, info := range infos {
+                if info.Relate == relateCall {
+                    source = info.Source
+                    line = info.Line
+                    break
+                }
+            }
+        }
+    }
+    log.Logf(0, "Seed generated from <Target: %s, Relate: %s>, Source: %s, Line: %d", targetCall.Name, relateCall.Name, source, line)
+
 	log.Logf(0, "Final seed program:\n%s", p.Serialize())
 
     return p, nil
