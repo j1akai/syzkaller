@@ -68,6 +68,21 @@ func GenerateSeedFromSyscallPair_debug(target *Target, choiceTable *ChoiceTable,
     p.sanitizeFix()
     p.debugValidate()
 
+	// 打印依据的target、relate和addr
+    var addr uint32 = 0
+    // 查找addr（如果choiceTable有SyscallPair信息）
+    if choiceTable != nil && targetCall != nil {
+        if infos, ok := choiceTable.SyscallPair[targetCall]; ok {
+            for _, info := range infos {
+                if info.Relate == relateCall {
+                    addr = info.Addr
+                    break
+                }
+            }
+        }
+    }
+    log.Logf(0, "Seed generated from <Target: %s, Relate: %s>, Addr: %d", targetCall.Name, relateCall.Name, addr)
+
 	log.Logf(0, "Final seed program:\n%s", p.Serialize())
 
     return p, nil

@@ -182,8 +182,9 @@ func normalizePrio(prios [][]int32) {
 // ChoiceTable新字段,记录所有<target_syscall,relate_syscall>对以及每个对在种子库中出现的频率
 type SyscallPairInfo_debug struct {
     Relate   *Syscall
-    Verified bool   // 是否在corpus中出现过
+    Verified bool   // 是否被动态验证过过
     Freq     int    // 出现次数
+	Addr	 uint32	// 记录地址(十进制)
 }
 
 // ChooseTable allows to do a weighted choice of a syscall for a given syscall

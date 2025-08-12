@@ -16,6 +16,7 @@ import (
 	"time"
 	"encoding/json"
 	stdlog "log"
+	"path/filepath"
 
 	"github.com/google/syzkaller/pkg/csource"
 	"github.com/google/syzkaller/pkg/hash"
@@ -139,7 +140,7 @@ func createIPCConfig(features *host.Features, config *ipc.Config) {
 // 输入:包含具有依赖信息的系统调用对的json文件
 // 输出:根据每个具有依赖关系的系统调用对生成一个种子
 func generateSeedsFromJSON_debug(jsonPath string, choiceTable *prog.ChoiceTable, target *prog.Target) ([]*prog.Prog, error) {
-	log.Logf(0, "%s", choiceTable.PrintChoiceTable_debug())
+	// log.Logf(0, "%s", choiceTable.PrintChoiceTable_debug())
 
 	if jsonPath == "" {
         log.Logf(0, "FlagSyscallPair is empty")
@@ -155,11 +156,18 @@ func generateSeedsFromJSON_debug(jsonPath string, choiceTable *prog.ChoiceTable,
     var dependencies []struct {
         Target string   `json:"Target"`
         Relate []string `json:"Relate"`
+		Addr   uint32   `json:"Addr"`
     }
 	// 读取json文件,转换到内存中,存储在dependencies
     if err := json.Unmarshal(data, &dependencies); err != nil {
         return nil, fmt.Errorf("Failed to parse JSON file: %v", err)
     }
+
+	// maxPairs := 10
+	// if len(dependencies) > maxPairs {
+	//     dependencies = dependencies[:maxPairs]
+	//     log.Logf(0, "Limiting to first %d syscall pairs", maxPairs)
+	// }
 
 	// 初始化ChoiceTable的SyscallPair字段(我们自定义的)
 	choiceTable.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo_debug)
@@ -180,6 +188,7 @@ func generateSeedsFromJSON_debug(jsonPath string, choiceTable *prog.ChoiceTable,
                 Relate:   relateCall,
                 Verified: false,
                 Freq:     0,
+				Addr:	  dep.Addr,
             })
         }
         if len(relateInfos) > 0 {
@@ -421,7 +430,25 @@ func main() {
 
 	// *****************************
 	// 将打印信息持久化到文件中
-	logFile := "/home/debug/log"
+	logDir := "/home/debug"
+	logFile := filepath.Join(logDir, "log")
+
+	// 检查并处理debug目录
+	if _, err := os.Stat(logDir); os.IsNotExist(err) {
+	    // 目录不存在则创建
+	    if err := os.MkdirAll(logDir, 0755); err != nil {
+	        log.Fatalf("Failed to create debug directory: %v", err)
+	    }
+	} else {
+	    // 目录存在则删除旧的日志文件（如果存在）
+	    if _, err := os.Stat(logFile); err == nil {
+	        if err := os.Remove(logFile); err != nil {
+	            log.Fatalf("Failed to remove old log file: %v", err)
+	        }
+	    }
+	}
+
+	// 创建新的日志文件
 	file, err := os.Create(logFile)
 	if err != nil {
 	    log.Fatalf("Failed to create log file: %v", err)
@@ -592,7 +619,7 @@ func (fuzzer *Fuzzer) addInputFromAnotherFuzzer(inp rpctype.Input) {
 	}
 	sig := hash.Hash(inp.Prog)
 	sign := inp.Signal.Deserialize()
-	fuzzer.addInputToCorpus(p, sign, sig)
+	fuzzer.addInputToCorpus(p, sign, sig, []uint32{})
 }
 
 func (fuzzer *Fuzzer) addCandidateInput(candidate rpctype.Candidate) {
@@ -656,8 +683,81 @@ func (fuzzer *FuzzerSnapshot) chooseProgram(r *rand.Rand) *prog.Prog {
 	return fuzzer.corpus[idx]
 }
 
+var updateLogMu sync.Mutex
+func (fuzzer *Fuzzer) updateSyscallPair_debug(p *prog.Prog, addrs []uint32) {
+    logFile := fmt.Sprintf("/home/debug/updateSyscallPair_debug_%x.log", hash.Hash(p.Serialize()))
+    updateLogMu.Lock()
+    defer updateLogMu.Unlock()
+    file, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+    if err != nil {
+        log.Logf(0, "Failed to open log file: %v", err)
+        return
+    }
+    defer file.Close()
+    stdlog.SetOutput(file)
+
+	// 0. 打印种子
+	fmt.Fprintf(file, "[debug] seed program:\n%s", p.Serialize())
+
+	// 1. 打印原始addrs内容
+    fmt.Fprintf(file, "[debug] raw addrs: %v\n", addrs)
+
+    // 2. 检查p中是否包含<target,relate>，并比对addr
+    if fuzzer.choiceTable == nil || fuzzer.choiceTable.SyscallPair == nil {
+        return
+    }
+    for i, call := range p.Calls {
+        infos, ok := fuzzer.choiceTable.SyscallPair[call.Meta]
+        if !ok {
+    	    // 没有找到任何以当前 syscall 为 target 的依赖关系
+    	    fmt.Fprintf(file, "[updateVerifiedAndFreq_debug] Program call #%d (%s) is not a target syscall\n", i, call.Meta.Name)
+    	    continue
+    	}
+    	if len(infos) == 0 {
+    	    fmt.Fprintf(file, "[updateVerifiedAndFreq_debug] Target syscall %s found but has no relate syscalls\n", call.Meta.Name)
+    	    continue
+    	}
+    	foundAnyRelate := false
+        for _, info := range infos {
+			foundRelateInProgram := false
+            for j := i - 1; j >= 0; j-- {
+                if p.Calls[j].Meta == info.Relate {
+					foundRelateInProgram = true
+                	foundAnyRelate = true
+					// 直接判断 addr 是否在 addrs 中
+                    addrMatched := false
+                    for _, a := range addrs {
+                        if a == info.Addr {
+                            addrMatched = true
+                            break
+                        }
+                    }
+                    if addrMatched {
+                        wasVerified := info.Verified
+                        info.Verified = true
+                        info.Freq++
+                        if !wasVerified {
+							fmt.Fprintf(file, "[updateVerifiedAndFreq_debug] <Target: %s, Relate: %s> Verified=true by source match\n", call.Meta.Name, info.Relate.Name)
+                        }
+						fmt.Fprintf(file, "[updateVerifiedAndFreq_debug] <Target: %s, Relate: %s> Freq=%d (source match)\n", call.Meta.Name, info.Relate.Name, info.Freq)
+                    } else {
+						fmt.Fprintf(file, "[updateVerifiedAndFreq_debug] <Target: %s, Relate: %s> not matched in lines\n", call.Meta.Name, info.Relate.Name)
+                    }
+                    break
+                }
+            }
+			if !foundRelateInProgram {
+        	    fmt.Fprintf(file, "[updateVerifiedAndFreq_debug] Target %s has relate %s but it is not present in this program\n", call.Meta.Name, info.Relate.Name)
+        	}
+        }
+		if !foundAnyRelate {
+    	    fmt.Fprintf(file, "[updateVerifiedAndFreq_debug] Target %s has %d relates but none were found in this program\n", call.Meta.Name, len(infos))
+    	}
+    }
+}
+
 // 在种子加入到种子库之后,更新ChoiceTable的SyscallPair字段
-func (fuzzer *Fuzzer) addInputToCorpus(p *prog.Prog, sign signal.Signal, sig hash.Sig) {
+func (fuzzer *Fuzzer) addInputToCorpus(p *prog.Prog, sign signal.Signal, sig hash.Sig, addrs []uint32) {
 	fuzzer.corpusMu.Lock()
 	added := false
 	if _, ok := fuzzer.corpusHashes[sig]; !ok {
@@ -680,62 +780,9 @@ func (fuzzer *Fuzzer) addInputToCorpus(p *prog.Prog, sign signal.Signal, sig has
 		fuzzer.signalMu.Unlock()
 	}
 
-	logFile := "/home/debug/addInputToCorpus.log"
-	file, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-	    log.Fatalf("Failed to open log file: %v", err)
+	if added {
+		go fuzzer.updateSyscallPair_debug(p, addrs)
 	}
-	defer file.Close()
-	stdlog.SetOutput(file)
-
-	log.Logf(0, "=== Program Calls ===")
-    for i, call := range p.Calls {
-        log.Logf(0, "Call #%d: %s", i, call.Meta.Name)
-    }
-    log.Logf(0, "====================")
-
-	// 查看当前种子是否包含<target_syscall,relate_syscall>,如果包含,则需要更新ChoiceTable.SyscallPair中的出现次数Freq信息
-	if added && fuzzer.choiceTable != nil && fuzzer.choiceTable.SyscallPair != nil {
-        for i, call := range p.Calls {
-            infos, ok := fuzzer.choiceTable.SyscallPair[call.Meta]
-            if !ok || len(infos) == 0 {
-				log.Logf(0, "[addInputToCorpus] Target syscall %s not found in SyscallPair map", call.Meta.Name)
-                continue
-            }
-			if len(infos) == 0 {
-                log.Logf(0, "[addInputToCorpus] Target syscall %s found but has no relate syscalls", call.Meta.Name)
-                continue
-            }
-
-            log.Logf(0, "[addInputToCorpus] Checking relates for target %s (has %d relates)", call.Meta.Name, len(infos))
-			foundAnyRelate := false
-            for _, info := range infos {
-				foundCurrentRelate := false
-                for j := i + 1; j < len(p.Calls); j++ {
-                    if p.Calls[j].Meta == info.Relate {
-						foundCurrentRelate = true
-						foundAnyRelate = true
-                        wasVerified := info.Verified
-                        info.Verified = true
-                        info.Freq++
-                        if !wasVerified {
-                            log.Logf(0, "[addInputToCorpus] <Target: %s, Relate: %s> First time, set Verified=true", call.Meta.Name, info.Relate.Name)
-                        }
-                        log.Logf(0, "[addInputToCorpus] <Target: %s, Relate: %s> happens, Freq=%d", call.Meta.Name, info.Relate.Name, info.Freq)
-                        break
-                    }
-                } 
-				if !foundCurrentRelate {
-                    log.Logf(0, "[addInputToCorpus] Target %s has relate %s but not found in this program", 
-                        call.Meta.Name, info.Relate.Name)
-                }
-            }
-			if !foundAnyRelate {
-                log.Logf(0, "[addInputToCorpus] Target %s has %d relates but none found in this program", 
-                    call.Meta.Name, len(infos))
-            }
-        }
-    }
 }
 
 func (fuzzer *Fuzzer) snapshot() FuzzerSnapshot {
