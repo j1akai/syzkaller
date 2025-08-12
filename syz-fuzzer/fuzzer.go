@@ -165,14 +165,14 @@ func generateSeedsFromJSON_debug(jsonPath string, choiceTable *prog.ChoiceTable,
 	choiceTable.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo_debug)
     for _, dep := range dependencies {
         targetCall := target.SyscallMap[dep.Target]
-        if targetCall == nil {
+        if targetCall == nil || !choiceTable.Enabled(targetCall.ID) {
             log.Logf(0, "Unknown target syscall: %v", dep.Target)
             continue
         }
         var relateInfos []*prog.SyscallPairInfo_debug
         for _, relate := range dep.Relate {
             relateCall := target.SyscallMap[relate]
-            if relateCall == nil {
+            if relateCall == nil || !choiceTable.Enabled(relateCall.ID) {
                 log.Logf(0, "Unknown relate syscall: %v", relate)
                 continue
             }
