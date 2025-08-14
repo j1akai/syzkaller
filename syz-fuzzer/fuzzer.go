@@ -624,7 +624,7 @@ func (fuzzer *Fuzzer) addInputFromAnotherFuzzer(inp rpctype.Input) {
 	}
 	sig := hash.Hash(inp.Prog)
 	sign := inp.Signal.Deserialize()
-	fuzzer.addInputToCorpus(p, sign, sig, []uint32{})
+	fuzzer.addInputToCorpus(p, sign, sig, []uint32{}, map[*prog.Syscall][][]uint32{})
 }
 
 func (fuzzer *Fuzzer) addCandidateInput(candidate rpctype.Candidate) {
@@ -690,7 +690,7 @@ func (fuzzer *FuzzerSnapshot) chooseProgram(r *rand.Rand) *prog.Prog {
 
 var updateLogMu sync.Mutex
 
-func (fuzzer *Fuzzer) updateVerifiedAndFreq_debug(p *prog.Prog, addrs []uint32) {
+func (fuzzer *Fuzzer) updateSyscallPair_debug(p *prog.Prog, addrs []uint32, allCover map[*prog.Syscall][][]uint32) {
     logFile := fmt.Sprintf("/home/debug/updateVerifiedAndFreq_debug_%x.log", hash.Hash(p.Serialize()))
     updateLogMu.Lock()
     defer updateLogMu.Unlock()
@@ -760,10 +760,11 @@ func (fuzzer *Fuzzer) updateVerifiedAndFreq_debug(p *prog.Prog, addrs []uint32) 
 	}
     fmt.Fprintf(file, "[debug] lines: %v\n", lines)
 
-    // 4. 检查p中是否包含<target,relate>，并比对source,line
+    // 4. 检查p中是否包含<target,relate>，并比对source,line, 进而更新verified
     if fuzzer.choiceTable == nil || fuzzer.choiceTable.SyscallPair == nil {
         return
     }
+	foundDependency := false
     for i, call := range p.Calls {
         infos, ok := fuzzer.choiceTable.SyscallPair[call.Meta]
         if !ok {
@@ -780,6 +781,7 @@ func (fuzzer *Fuzzer) updateVerifiedAndFreq_debug(p *prog.Prog, addrs []uint32) 
 			foundRelateInProgram := false
             for j := i + 1; j < len(p.Calls); j++ {
                 if p.Calls[j].Meta == info.Relate {
+					foundDependency = true
 					foundRelateInProgram = true
                 	foundAnyRelate = true
                     key := info.Source + ":" + strconv.Itoa(info.Line)
@@ -805,10 +807,72 @@ func (fuzzer *Fuzzer) updateVerifiedAndFreq_debug(p *prog.Prog, addrs []uint32) 
     	    fmt.Fprintf(file, "[updateVerifiedAndFreq_debug] Target %s has %d relates but none were found in this program\n", call.Meta.Name, len(infos))
     	}
     }
+
+	// 5. 若种子中不包含<target,relate>，则分析种子，判断是否存在两个系统调用所执行的source-line被同一配置项管辖，若是，则添加SyscallPairInfo_debug
+	// 假设 configMap 已经初始化好
+	var configMap map[string]string // key: source-line, value: config name
+	if !foundDependency {
+		// 5-1. 将 allCover 中的 cover 转为 source-line
+		callSourceLines := make(map[*prog.Syscall]map[string]struct{})
+		for meta, covers := range allCover {
+		    callSourceLines[meta] = make(map[string]struct{})
+		    for _, cover := range covers {
+		        for _, addr := range cover {
+		            // 转换 addr 为 source-line
+		            addrStr := fmt.Sprintf("0x%016x", uint64(addr))
+		            // 调用 addr2line，可以考虑缓存结果以提升效率
+		            cmd := exec.Command("addr2line", "-e", "/home/vmlinux", addrStr)
+		            out, err := cmd.Output()
+		            if err != nil {
+		                continue
+		            }
+		            res := strings.TrimSpace(string(out))
+		            idx := strings.Index(res, "linux/")
+		            if idx != -1 {
+		                res = res[idx+len("linux/"):]
+		            }
+		            if idx := strings.Index(res, " (discriminator"); idx != -1 {
+		                res = res[:idx]
+		            }
+		            if idx := strings.LastIndex(res, ":"); idx != -1 {
+		                sourceLine := res
+		                callSourceLines[meta][sourceLine] = struct{}{}
+		            }
+		        }
+		    }
+		}
+
+		// 5-2. 双重循环判断是否有两个 syscall 的 cover 被同一配置项管辖
+		for meta1, lines1 := range callSourceLines {
+		    for meta2, lines2 := range callSourceLines {
+		        if meta1 == meta2 {
+		            continue
+		        }
+		        for l1 := range lines1 {
+		            for l2 := range lines2 {
+		                config1, ok1 := configMap[l1]
+		                config2, ok2 := configMap[l2]
+		                if ok1 && ok2 && config1 == config2 && config1 != "" {
+		                    // 被同一配置项管辖
+		                    // 插入到SyscallPair
+		                    info := &prog.SyscallPairInfo_debug{
+		                        Relate:   meta2,
+		                        Verified: false,
+		                        Freq:     0,
+		                        Source:   l1 + "|" + l2,// 疑点
+		                        Line:     0,
+		                    }
+		                    fuzzer.choiceTable.SyscallPair[meta1] = append(fuzzer.choiceTable.SyscallPair[meta1], info)
+		                }
+		            }
+		        }
+		    }
+		}
+	}
 }
 
 // 在种子加入到种子库之后,更新ChoiceTable的SyscallPair字段
-func (fuzzer *Fuzzer) addInputToCorpus(p *prog.Prog, sign signal.Signal, sig hash.Sig, addrs []uint32) {
+func (fuzzer *Fuzzer) addInputToCorpus(p *prog.Prog, sign signal.Signal, sig hash.Sig, addrs []uint32, allCover map[*prog.Syscall][][]uint32) {
 	fuzzer.corpusMu.Lock()
 	added := false
 	if _, ok := fuzzer.corpusHashes[sig]; !ok {
@@ -832,7 +896,7 @@ func (fuzzer *Fuzzer) addInputToCorpus(p *prog.Prog, sign signal.Signal, sig has
 	}
 
 	if added {
-		go fuzzer.updateVerifiedAndFreq_debug(p, addrs)
+		go fuzzer.updateSyscallPair_debug(p, addrs, allCover)
 	}
 }
 

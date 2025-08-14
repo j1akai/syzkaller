@@ -123,6 +123,7 @@ func (proc *Proc) triageInput(item *WorkTriage) {
 	// Compute input coverage and non-flaky signal for minimization.
 	notexecuted := 0
 	rawCover := []uint32{}
+	allCover := make(map[*prog.Syscall][][]uint32) // 键为Call.Meta
 	for i := 0; i < signalRuns; i++ {
 		info := proc.executeRaw(proc.execOptsCover, item.p, StatTriage)
 		if !reexecutionSuccess(info, &item.info, item.call) {
@@ -133,6 +134,11 @@ func (proc *Proc) triageInput(item *WorkTriage) {
 			}
 			continue
 		}
+		// 收集所有call的cover
+    	for idx, call := range item.p.Calls {
+    	    _, cover := getSignalAndCover(item.p, info, idx)
+    	     allCover[call.Meta] = append(allCover[call.Meta], cover)
+    	}
 		thisSignal, thisCover := getSignalAndCover(item.p, info, item.call)
 		if len(rawCover) == 0 && proc.fuzzer.fetchRawCover {
 			rawCover = append([]uint32{}, thisCover...)
@@ -163,6 +169,17 @@ func (proc *Proc) triageInput(item *WorkTriage) {
 			})
 	}
 
+	// 最小化后同步 allCover
+	callsInProg := make(map[*prog.Syscall]bool)
+	for _, call := range item.p.Calls {
+	    callsInProg[call.Meta] = true
+	}
+	for meta := range allCover {
+	    if !callsInProg[meta] {
+	        delete(allCover, meta)
+	    }
+	}
+
 	data := item.p.Serialize()
 	sig := hash.Hash(data)
 
@@ -176,7 +193,7 @@ func (proc *Proc) triageInput(item *WorkTriage) {
 		RawCover: rawCover,
 	})
 
-	proc.fuzzer.addInputToCorpus(item.p, inputSignal, sig, inputCover.Serialize())
+	proc.fuzzer.addInputToCorpus(item.p, inputSignal, sig, inputCover.Serialize(), allCover)
 
 	if item.flags&ProgSmashed == 0 {
 		proc.fuzzer.workQueue.enqueue(&WorkSmash{item.p, item.call})
