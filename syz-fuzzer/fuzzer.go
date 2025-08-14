@@ -17,6 +17,10 @@ import (
 	"encoding/json"
 	stdlog "log"
 	"path/filepath"
+	"os/exec"
+    "strings"
+	"strconv"
+	"bytes"
 
 	"github.com/google/syzkaller/pkg/csource"
 	"github.com/google/syzkaller/pkg/hash"
@@ -32,6 +36,16 @@ import (
 	_ "github.com/google/syzkaller/sys"
 	"github.com/google/syzkaller/sys/targets"
 )
+
+// 存储每一行区间和对应 CONFIG 的映射
+type LineRangeConfig struct {
+    StartLine int
+    EndLine   int
+    Configs   []string
+}
+
+// 保存每个源文件对应的行范围与 CONFIG 的映射
+type SourceLineToConfig map[string][]LineRangeConfig
 
 type Fuzzer struct {
 	name              string
@@ -66,6 +80,8 @@ type Fuzzer struct {
 
 	checkResult *rpctype.CheckArgs
 	logMu       sync.Mutex
+
+	sourceLineToConfig SourceLineToConfig
 }
 
 type FuzzerSnapshot struct {
@@ -137,119 +153,102 @@ func createIPCConfig(features *host.Features, config *ipc.Config) {
 	}
 }
 
-// 输入:包含具有依赖信息的系统调用对的json文件
-// 输出:根据每个具有依赖关系的系统调用对生成一个种子
+// 输入: 包含具有依赖信息的系统调用对的 json 文件
+// 输出: 根据每个具有依赖关系的系统调用对生成一个种子
 func generateSeedsFromJSON_debug(jsonPath string, choiceTable *prog.ChoiceTable, target *prog.Target) ([]*prog.Prog, error) {
-	// log.Logf(0, "%s", choiceTable.PrintChoiceTable_debug())
-
+    // 存储已生成种子的 target + relate 组合（防止重复）
+	generatedPairs := make(map[string]bool)
 	if jsonPath == "" {
         log.Logf(0, "FlagSyscallPair is empty")
         return nil, nil
     }
-    log.Logf(0, "FlagSyscallPair: %s", jsonPath)
+    // log.Logf(0, "FlagSyscallPair: %s", jsonPath)
 
-	data, err := os.ReadFile(jsonPath)
+    data, err := os.ReadFile(jsonPath)
     if err != nil {
         return nil, fmt.Errorf("Failed to read JSON file: %v", err)
     }
 
     var dependencies []struct {
-        Target string   `json:"Target"`
-        Relate []string `json:"Relate"`
-		Addr   uint32   `json:"Addr"`
+        Targets []string `json:"Target"`
+        Relate  []string `json:"Relate"`
+        Addr    uint32   `json:"Addr"`
     }
-	// 读取json文件,转换到内存中,存储在dependencies
+
+    // 解析 JSON 数据，适配新结构
     if err := json.Unmarshal(data, &dependencies); err != nil {
         return nil, fmt.Errorf("Failed to parse JSON file: %v", err)
     }
 
-	// maxPairs := 10
-	// if len(dependencies) > maxPairs {
-	//     dependencies = dependencies[:maxPairs]
-	//     log.Logf(0, "Limiting to first %d syscall pairs", maxPairs)
-	// }
-
-	// 初始化ChoiceTable的SyscallPair字段(我们自定义的)
-	choiceTable.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo_debug)
-    for _, dep := range dependencies {
-        targetCall := target.SyscallMap[dep.Target]
-        if targetCall == nil || !choiceTable.Enabled(targetCall.ID) {
-            log.Logf(0, "Unknown target syscall: %v", dep.Target)
-            continue
-        }
-        var relateInfos []*prog.SyscallPairInfo_debug
-        for _, relate := range dep.Relate {
-            relateCall := target.SyscallMap[relate]
-            if relateCall == nil || !choiceTable.Enabled(relateCall.ID) {
-                log.Logf(0, "Unknown relate syscall: %v", relate)
-                continue
-            }
-            relateInfos = append(relateInfos, &prog.SyscallPairInfo_debug{
-                Relate:   relateCall,
-                Verified: false,
-                Freq:     0,
-				Addr:	  dep.Addr,
-            })
-        }
-        if len(relateInfos) > 0 {
-            choiceTable.SyscallPair[targetCall] = relateInfos
-        }
-    }
-
-	log.Logf(0, "==== SyscallPair ====")
-	for target, relates := range choiceTable.SyscallPair {
-	    log.Logf(0, "Target: %s", target.Name)
-	    for _, info := range relates {
-	        log.Logf(0, "    Relate: %s, Verified: %v, Freq: %d", info.Relate.Name, info.Verified, info.Freq)
-	    }
+	maxPairs := 200000
+	if len(dependencies) > maxPairs {
+	    dependencies = dependencies[:maxPairs]
+	    log.Logf(0, "Limiting to first %d syscall pairs", maxPairs)
 	}
-	log.Logf(0, "==== SyscallPair ====")
-
-    log.Logf(0, "Dependencies:")
-    for _, dep := range dependencies {
-        log.Logf(0, "Target: %s, Relate: %v", dep.Target, dep.Relate)
-    }
 
     var seeds []*prog.Prog
     rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
+    choiceTable.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo_debug)
+
     for _, dep := range dependencies {
-		// 遍历dependencies,对每一对target_syscall和relate_syscall都调用GenerateSeedFromSyscallPair_debug来生成种子
-        targetCall := target.SyscallMap[dep.Target]
-        if targetCall == nil {
-            log.Logf(0, "Unknown target syscall: %v", dep.Target)
-            continue
-        }
-		if !choiceTable.Enabled(targetCall.ID) {
-    	    log.Logf(0, "Target syscall not enabled: %v [%v], skipping", dep.Target, targetCall.ID)
-    	    continue
-    	}
-        for _, relate := range dep.Relate {
-            relateCall := target.SyscallMap[relate]
-            if relateCall == nil {
-                log.Logf(0, "Unknown relate syscall: %v", relate)
-                continue
-            }
-        	if !choiceTable.Enabled(relateCall.ID) {
-        	    log.Logf(0, "Relate syscall not enabled: %v [%v], skipping", relate, relateCall.ID)
-        	    continue
-        	}
-            log.Logf(0, "Generating seed for \nTarget: %s, Relate: %s", dep.Target, relate)
-            p, err := prog.GenerateSeedFromSyscallPair_debug(target, choiceTable, targetCall, relateCall, rnd)
-            if err != nil {
-                log.Logf(0, "Failed to generate seed program for %v and %v: %v", dep.Target, relate, err)
+        // 遍历每一个 Target
+        for _, targetName := range dep.Targets {
+            targetCall := target.SyscallMap[targetName]
+            if targetCall == nil || !choiceTable.Enabled(targetCall.ID) {
+                // log.Logf(0, "Unknown target syscall: %v", targetName)
                 continue
             }
 
-			log.Logf(0, "Generated seed with %d calls", len(p.Calls))
-
-            seeds = append(seeds, p)
+            var relateInfos []*prog.SyscallPairInfo_debug
+            for _, relate := range dep.Relate {
+                relateCall := target.SyscallMap[relate]
+                if relateCall == nil || !choiceTable.Enabled(relateCall.ID) {
+                    // log.Logf(0, "Unknown relate syscall: %v", relate)
+                    continue
+                }
+				pairKey := fmt.Sprintf("%s:%s", targetName, relate)
+            	if generatedPairs[pairKey] {
+            	    log.Logf(1, "Skipping duplicate seed generation for %v -> %v", targetName, relate)
+            	    continue // 已经有 seed 被生成过了，跳过
+            	}
+			
+            	// 把这个 pair 标记为已生成过 seed
+            	generatedPairs[pairKey] = true
+                relateInfos = append(relateInfos, &prog.SyscallPairInfo_debug{
+                    Relate:   relateCall,
+                    Verified: false,
+                    Freq:     0,
+                    Addr:     dep.Addr,
+                })
+                // log.Logf(0, "Generating seed for \nTarget: %s, Relate: %s", targetName, relate)
+                p, err := prog.GenerateSeedFromSyscallPair_debug(target, choiceTable, targetCall, relateCall, rnd)
+                if err != nil {
+                    log.Logf(0, "Failed to generate seed program for %v and %v: %v", targetName, relate, err)
+                    continue
+                }
+                // log.Logf(0, "Generated seed with %d calls", len(p.Calls))
+                seeds = append(seeds, p)
+            }
+            if len(relateInfos) > 0 {
+                choiceTable.SyscallPair[targetCall] = relateInfos
+            }
         }
     }
 
-	log.Logf(0, "Total seeds generated: %d", len(seeds))
+    // 打印 SyscallPair 信息供调试
+    // log.Logf(0, "==== SyscallPair ====")
+    // for targetCall, relates := range choiceTable.SyscallPair {
+    //     log.Logf(0, "Target: %s", targetCall.Name)
+    //     for _, info := range relates {
+    //         log.Logf(0, "    Relate: %s, Verified: %v, Freq: %d, Addr: %d", info.Relate.Name, info.Verified, info.Freq, info.Addr)
+    //     }
+    // }
+    // log.Logf(0, "==== SyscallPair ====")
 
+    log.Logf(0, "Total seeds generated: %d", len(seeds))
     return seeds, nil
 }
+
 
 // 在fuzzer端初始化ChoiceTable之后,利用静态分析得到的结果json文件
 // 生成初始种子,并加入到候选队列中,等待被执行
@@ -259,15 +258,76 @@ func (fuzzer *Fuzzer) injectInitialSeeds_debug(syscallPairPath string) {
         log.Logf(0, "Failed to generate seeds from JSON: %v", err)
         return
     }
-	fuzzer.workQueue.PrintAll_debug()
+	// fuzzer.workQueue.PrintAll_debug()
     for _, seed := range seeds {
         fuzzer.workQueue.enqueue(&WorkCandidate{
             p:     seed,
             flags: ProgCandidate,
         })
     }
-	fuzzer.workQueue.PrintAll_debug()
+	// fuzzer.workQueue.PrintAll_debug()
     log.Logf(0, "Generated %d seeds from JSON file", len(seeds))
+}
+
+func loadSourceLineToConfig(jsonPath string) (SourceLineToConfig, error) {
+    data, err := os.ReadFile(jsonPath)
+    if err != nil {
+        return nil, fmt.Errorf("failed to read file: %v", err)
+    }
+
+    var raw map[string]map[string][]string
+    if err := json.Unmarshal(data, &raw); err != nil {
+        return nil, fmt.Errorf("failed to unmarshal JSON: %v", err)
+    }
+
+    result := make(SourceLineToConfig)
+
+    for file, lineRanges := range raw {
+        for lineRangeStr, configs := range lineRanges {
+            parts := strings.Split(lineRangeStr, "-")
+            if len(parts) != 2 {
+                log.Logf(0, "Invalid line range format: %s", lineRangeStr)
+                continue
+            }
+            start, err1 := strconv.Atoi(parts[0])
+            end, err2 := strconv.Atoi(parts[1])
+            if err1 != nil || err2 != nil {
+                log.Logf(0, "Invalid line numbers in range: %s", lineRangeStr)
+                continue
+            }
+            result[file] = append(result[file], LineRangeConfig{
+                StartLine: start,
+                EndLine:   end,
+                Configs:   configs,
+            })
+        }
+    }
+
+    return result, nil
+}
+
+
+// PrintSourceLineToConfig_debug 打印 sourceLineToConfig 的内容，用于调试
+func (f *Fuzzer) PrintSourceLineToConfig_debug() string {
+    var buf bytes.Buffer
+    buf.WriteString("SourceLineToConfig Debug Info:\n")
+    
+    // 按文件名排序以保证输出顺序一致
+    fileNames := make([]string, 0, len(f.sourceLineToConfig))
+    for file := range f.sourceLineToConfig {
+        fileNames = append(fileNames, file)
+    }
+    sort.Strings(fileNames)
+
+    for _, file := range fileNames {
+        ranges := f.sourceLineToConfig[file]
+        buf.WriteString(fmt.Sprintf("File: %s\n", file))
+        for _, lr := range ranges {
+            buf.WriteString(fmt.Sprintf("  Lines %d-%d: %v\n", lr.StartLine, lr.EndLine, lr.Configs))
+        }
+    }
+
+    return buf.String()
 }
 
 // nolint: funlen
@@ -458,8 +518,17 @@ func main() {
 	
 	// 利用依赖信息生成候选种子
 	fuzzer.injectInitialSeeds_debug(*flagSyscallPair)
-	// *****************************
 
+	
+	// 读取sourceline2config
+	sourceLineToConfig, err := loadSourceLineToConfig("/home/sourceline2config.json")
+	if err != nil {
+	    log.Fatalf("Failed to load sourceline2config.json: %v", err)
+	}
+	fuzzer.sourceLineToConfig = sourceLineToConfig
+
+	// log.Logf(0, "%s", fuzzer.PrintSourceLineToConfig_debug())
+	// *****************************
 
 	log.Logf(0, "starting %v fuzzer processes", *flagProcs)
 	for pid := 0; pid < *flagProcs; pid++ {
@@ -619,7 +688,7 @@ func (fuzzer *Fuzzer) addInputFromAnotherFuzzer(inp rpctype.Input) {
 	}
 	sig := hash.Hash(inp.Prog)
 	sign := inp.Signal.Deserialize()
-	fuzzer.addInputToCorpus(p, sign, sig, []uint32{})
+	fuzzer.addInputToCorpus(p, sign, sig, []uint32{}, map[*prog.Syscall][]uint32{})
 }
 
 func (fuzzer *Fuzzer) addCandidateInput(candidate rpctype.Candidate) {
@@ -683,8 +752,32 @@ func (fuzzer *FuzzerSnapshot) chooseProgram(r *rand.Rand) *prog.Prog {
 	return fuzzer.corpus[idx]
 }
 
+// 将32位内核PC地址转为64位地址字符串
+func addr32To64Hex_debug(addr32 uint32) string {
+    addr := uint64(addr32)
+    // 高位补1直到64位
+    if addr < 0xffffffff80000000 {
+        addr |= 0xffffffff00000000
+    }
+    return fmt.Sprintf("0x%016x", addr)
+}
+
+// 调试用的Line2Config_debug函数
+func (f *Fuzzer) line2Config(sourceFile string, lineNumber int) []string {
+    ranges, ok := f.sourceLineToConfig[sourceFile]
+    if !ok {
+        return nil
+    }
+    for _, r := range ranges {
+        if lineNumber >= r.StartLine && lineNumber <= r.EndLine {
+            return r.Configs
+        }
+    }
+    return nil
+}
+
 var updateLogMu sync.Mutex
-func (fuzzer *Fuzzer) updateSyscallPair_debug(p *prog.Prog, addrs []uint32) {
+func (fuzzer *Fuzzer) updateSyscallPair_debug(p *prog.Prog, addrs []uint32, allCover map[*prog.Syscall][]uint32) {
     logFile := fmt.Sprintf("/home/debug/updateSyscallPair_debug_%x.log", hash.Hash(p.Serialize()))
     updateLogMu.Lock()
     defer updateLogMu.Unlock()
@@ -702,19 +795,20 @@ func (fuzzer *Fuzzer) updateSyscallPair_debug(p *prog.Prog, addrs []uint32) {
 	// 1. 打印原始addrs内容
     fmt.Fprintf(file, "[debug] raw addrs: %v\n", addrs)
 
-    // 2. 检查p中是否包含<target,relate>，并比对addr
+    // 2. 检查p中是否包含<target,relate>，并比对addr, 进而更新verified
     if fuzzer.choiceTable == nil || fuzzer.choiceTable.SyscallPair == nil {
         return
     }
+	foundDependency := false
     for i, call := range p.Calls {
         infos, ok := fuzzer.choiceTable.SyscallPair[call.Meta]
         if !ok {
     	    // 没有找到任何以当前 syscall 为 target 的依赖关系
-    	    fmt.Fprintf(file, "[updateVerifiedAndFreq_debug] Program call #%d (%s) is not a target syscall\n", i, call.Meta.Name)
+    	    fmt.Fprintf(file, "[updateSyscallPair_debug] Program call #%d (%s) is not a target syscall\n", i, call.Meta.Name)
     	    continue
     	}
     	if len(infos) == 0 {
-    	    fmt.Fprintf(file, "[updateVerifiedAndFreq_debug] Target syscall %s found but has no relate syscalls\n", call.Meta.Name)
+    	    fmt.Fprintf(file, "[updateSyscallPair_debug] Target syscall %s found but has no relate syscalls\n", call.Meta.Name)
     	    continue
     	}
     	foundAnyRelate := false
@@ -722,6 +816,7 @@ func (fuzzer *Fuzzer) updateSyscallPair_debug(p *prog.Prog, addrs []uint32) {
 			foundRelateInProgram := false
             for j := i - 1; j >= 0; j-- {
                 if p.Calls[j].Meta == info.Relate {
+					foundDependency = true
 					foundRelateInProgram = true
                 	foundAnyRelate = true
 					// 直接判断 addr 是否在 addrs 中
@@ -737,27 +832,127 @@ func (fuzzer *Fuzzer) updateSyscallPair_debug(p *prog.Prog, addrs []uint32) {
                         info.Verified = true
                         info.Freq++
                         if !wasVerified {
-							fmt.Fprintf(file, "[updateVerifiedAndFreq_debug] <Target: %s, Relate: %s> Verified=true by source match\n", call.Meta.Name, info.Relate.Name)
+							fmt.Fprintf(file, "[updateSyscallPair_debug] <Target: %s, Relate: %s> Verified=true by source match\n", call.Meta.Name, info.Relate.Name)
                         }
-						fmt.Fprintf(file, "[updateVerifiedAndFreq_debug] <Target: %s, Relate: %s> Freq=%d (source match)\n", call.Meta.Name, info.Relate.Name, info.Freq)
+						fmt.Fprintf(file, "[updateSyscallPair_debug] <Target: %s, Relate: %s> Freq=%d (source match)\n", call.Meta.Name, info.Relate.Name, info.Freq)
                     } else {
-						fmt.Fprintf(file, "[updateVerifiedAndFreq_debug] <Target: %s, Relate: %s> not matched in lines\n", call.Meta.Name, info.Relate.Name)
+						fmt.Fprintf(file, "[updateSyscallPair_debug] <Target: %s, Relate: %s> not matched in lines\n", call.Meta.Name, info.Relate.Name)
                     }
                     break
                 }
             }
 			if !foundRelateInProgram {
-        	    fmt.Fprintf(file, "[updateVerifiedAndFreq_debug] Target %s has relate %s but it is not present in this program\n", call.Meta.Name, info.Relate.Name)
+        	    fmt.Fprintf(file, "[updateSyscallPair_debug] Target %s has relate %s but it is not present in this program\n", call.Meta.Name, info.Relate.Name)
         	}
         }
 		if !foundAnyRelate {
-    	    fmt.Fprintf(file, "[updateVerifiedAndFreq_debug] Target %s has %d relates but none were found in this program\n", call.Meta.Name, len(infos))
+    	    fmt.Fprintf(file, "[updateSyscallPair_debug] Target %s has %d relates but none were found in this program\n", call.Meta.Name, len(infos))
     	}
     }
+
+	// 3. 如果p中不包含<target, relate>,那么分析种子，判断是否存在两个系统调用所执行的代码被同一配置项管辖
+	if !foundDependency {
+		fmt.Fprintf(file, "[updateSyscallPair_debug] Program has no <target, relate>\n")
+		fmt.Fprintf(file, "[updateSyscallPair_debug] allCover dump:\n")
+    	for syscall, cover := range allCover {
+    	    fmt.Fprintf(file, "  Syscall: %s\n    Cover: %v\n", syscall.Name, cover)
+    	}
+
+		// 3-1 将allCover中的每个syscall的每个cover都转换成对应的source-line,并把source-line对应到Config
+		fmt.Fprintf(file, "[updateSyscallPair_debug] 3-1: uint32 cover -> source:line cover -> config cover\n")
+		vmlinux := "/home/vmlinux"
+		allConfig := make(map[*prog.Syscall]map[string]struct{})
+        for syscall, coverAddrs := range allCover {
+            fmt.Fprintf(file, "  Syscall: %s\n", syscall.Name)
+            // 转成64位地址字符串
+            var addrList []string
+            for _, addr32 := range coverAddrs {
+                addrList = append(addrList, addr32To64Hex_debug(addr32))
+            }
+            fmt.Fprintf(file, "    raw cover: %v\n", coverAddrs)
+            fmt.Fprintf(file, "    64bit addrs(hex): %v\n", addrList)
+
+            if len(addrList) > 0 {
+                args := append([]string{"-e", vmlinux}, addrList...)
+                cmd := exec.Command("addr2line", args...)
+                out, err := cmd.Output()
+                if err != nil {
+                    fmt.Fprintf(file, "    [updateSyscallPair_debug] addr2line failed: %v\n", err)
+                    continue
+                }
+                results := strings.Split(strings.TrimSpace(string(out)), "\n")
+                for i, res := range results {
+                    // 只保留相对路径
+                    if idx := strings.Index(res, "/home/jiakai/linux/"); idx != -1 {
+                        res = res[idx+len("/home/jiakai/linux/"):]
+                    }
+                    if idx := strings.Index(res, "./"); idx != -1 {
+                        res = res[idx+len("./"):]
+                    }
+                    if idx := strings.Index(res, " (discriminator"); idx != -1 {
+                        res = res[:idx]
+                    }
+                    if idx := strings.LastIndex(res, ":"); idx != -1 {
+                        source := res[:idx]
+                        line := res[idx+1:]
+                        fmt.Fprintf(file, "    addr2line(%s) = %s:%s\n", addrList[i], source, line)
+						lineNum, _ := strconv.Atoi(line)
+						configs := fuzzer.line2Config(source, lineNum)
+						if len(configs) > 0 {
+						    for _, config := range configs {
+						        if allConfig[syscall] == nil {
+						            allConfig[syscall] = make(map[string]struct{})
+						        }
+						        if _, exists := allConfig[syscall][config]; !exists {
+						            allConfig[syscall][config] = struct{}{}
+						            fmt.Fprintf(file, "      [Line2Config_debug] config: %s\n", config)
+						        }
+						    }
+						}
+                    } else {
+                        fmt.Fprintf(file, "    addr2line(%s) parse error\n", addrList[i])
+                    }
+                }
+            }
+        }
+
+		// 3-2 检查 allConfig，若两个 syscall 的 configs 有交集，则插入到 ChoiceTable 的 SyscallPair 字段
+		fmt.Fprintf(file, "[updateSyscallPair_debug] 3-2: check config intersection\n")
+		for sysA, configsA := range allConfig {
+		    for sysB, configsB := range allConfig {
+		        if sysA == sysB {
+		            continue
+		        }
+		        // 检查交集
+		        for config := range configsA {
+		            if _, ok := configsB[config]; ok {
+		                // 有交集，插入到 ChoiceTable 的 SyscallPair
+		                // 检查是否已存在
+               			exists := false
+               			for _, info := range fuzzer.choiceTable.SyscallPair[sysA] {
+               			    if info.Relate == sysB {
+               			        exists = true
+               			        break
+               			    }
+               			}
+               			if !exists {
+               			    fuzzer.choiceTable.SyscallPair[sysA] = append(fuzzer.choiceTable.SyscallPair[sysA], &prog.SyscallPairInfo_debug{
+               			        Relate:   sysB,
+               			        Verified: false,
+               			        Freq:     0,
+               			        Addr:     0,
+               			    })
+               			    fmt.Fprintf(file, "    [config-intersect] %s <-> %s via config %s\n", sysA.Name, sysB.Name, config)
+               			}
+		            }
+		        }
+		    }
+		}
+	}
 }
 
 // 在种子加入到种子库之后,更新ChoiceTable的SyscallPair字段
-func (fuzzer *Fuzzer) addInputToCorpus(p *prog.Prog, sign signal.Signal, sig hash.Sig, addrs []uint32) {
+func (fuzzer *Fuzzer) addInputToCorpus(p *prog.Prog, sign signal.Signal, sig hash.Sig, addrs []uint32, allCover map[*prog.Syscall][]uint32) {
 	fuzzer.corpusMu.Lock()
 	added := false
 	if _, ok := fuzzer.corpusHashes[sig]; !ok {
@@ -781,7 +976,7 @@ func (fuzzer *Fuzzer) addInputToCorpus(p *prog.Prog, sign signal.Signal, sig has
 	}
 
 	if added {
-		go fuzzer.updateSyscallPair_debug(p, addrs)
+		go fuzzer.updateSyscallPair_debug(p, addrs, allCover)
 	}
 }
 

@@ -6,7 +6,7 @@ package prog
 import (
 	"math/rand"
     "fmt"
-	"github.com/google/syzkaller/pkg/log"
+	// "github.com/google/syzkaller/pkg/log"
 )
 
 // Generate generates a random program with ncalls calls.
@@ -48,7 +48,7 @@ func GenerateSeedFromSyscallPair_debug(target *Target, choiceTable *ChoiceTable,
     s := newState(target, choiceTable, nil)
 
     // 把relate_syscall包含进种子
-	log.Logf(0, "Generating relate syscall: \n%s", relateCall.Name)
+	// log.Logf(0, "Generating relate syscall: \n%s", relateCall.Name)
     calls := r.generateParticularCall(s, relateCall)
     for _, c := range calls {
         s.analyze(c)
@@ -56,7 +56,7 @@ func GenerateSeedFromSyscallPair_debug(target *Target, choiceTable *ChoiceTable,
     }
 
     // 把target_syscall包含进种子
-	log.Logf(0, "Generating target syscall: \n%s", targetCall.Name)
+	// log.Logf(0, "Generating target syscall: \n%s", targetCall.Name)
     calls = r.generateParticularCall(s, targetCall)
     for _, c := range calls {
         s.analyze(c)
@@ -64,26 +64,13 @@ func GenerateSeedFromSyscallPair_debug(target *Target, choiceTable *ChoiceTable,
     }
 
     // 检查语义及有效性
-	log.Logf(0, "SanitizeFix and debugValidate ...")
+	// log.Logf(0, "SanitizeFix and debugValidate ...")
     p.sanitizeFix()
     p.debugValidate()
 
-	// 打印依据的target、relate和addr
-    var addr uint32 = 0
-    // 查找addr（如果choiceTable有SyscallPair信息）
-    if choiceTable != nil && targetCall != nil {
-        if infos, ok := choiceTable.SyscallPair[targetCall]; ok {
-            for _, info := range infos {
-                if info.Relate == relateCall {
-                    addr = info.Addr
-                    break
-                }
-            }
-        }
-    }
-    log.Logf(0, "Seed generated from <Target: %s, Relate: %s>, Addr: %d", targetCall.Name, relateCall.Name, addr)
+    // log.Logf(0, "Seed generated from <Target: %s, Relate: %s>", targetCall.Name, relateCall.Name)
 
-	log.Logf(0, "Final seed program:\n%s", p.Serialize())
+	// log.Logf(0, "Final seed program:\n%s", p.Serialize())
 
     return p, nil
 }

@@ -38,8 +38,8 @@ func (p *Prog) Mutate(rs rand.Source, ncalls int, ct *ChoiceTable, corpus []*Pro
 	}
 	for stop, ok := false, false; !stop; stop = ok && len(p.Calls) != 0 && r.oneOf(3) {
 		switch {
-		// 五分之一的概率,利用依赖信息插入新系统调用
-		case r.oneOf(5):
+		// 三分之一的概率,利用依赖信息插入新系统调用
+		case r.oneOf(3):
 			ok = ctx.insertCallWithDependency_debug()
 		case r.oneOf(5):
 			// Not all calls have anything squashable,
@@ -124,6 +124,9 @@ func (ctx *mutator) insertCallWithDependency_debug() bool {
         }
 		log.Logf(0, "[insertCallWithDependency_debug] Call #%d (%s) has %d dependency pairs", i, call.Meta.Name, len(infos))
 
+		rand.Shuffle(len(infos), func(i, j int) {
+		    infos[i], infos[j] = infos[j], infos[i]
+		})
 		// 遍历依赖于该syscall的relate_syscall
         for _, info := range infos {
             log.Logf(0, "[insertCallWithDependency_debug]   <Target: %s, Relate: %s> Verified=%v Freq=%d",

@@ -740,7 +740,7 @@ func (target *Target) Timeouts(slowdown int) Timeouts {
 		// in 140-280s detection delay.
 		// So the current timeout is 5 mins (300s).
 		// We don't want it to be too long too because it will waste time on real hangs.
-		timeouts.NoOutput = 5 * time.Minute
+		timeouts.NoOutput = 30 * time.Minute
 	}
 	if timeouts.VMRunningTime == 0 {
 		timeouts.VMRunningTime = time.Hour
