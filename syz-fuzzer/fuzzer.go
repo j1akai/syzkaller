@@ -180,12 +180,6 @@ func generateSeedsFromJSON_debug(jsonPath string, choiceTable *prog.ChoiceTable,
         return nil, fmt.Errorf("Failed to parse JSON file: %v", err)
     }
 
-	maxPairs := 200000
-	if len(dependencies) > maxPairs {
-	    dependencies = dependencies[:maxPairs]
-	    log.Logf(0, "Limiting to first %d syscall pairs", maxPairs)
-	}
-
     var seeds []*prog.Prog
     rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
     choiceTable.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo_debug)
@@ -269,7 +263,22 @@ func (fuzzer *Fuzzer) injectInitialSeeds_debug(syscallPairPath string) {
     log.Logf(0, "Generated %d seeds from JSON file", len(seeds))
 }
 
-func loadSourceLineToConfig(jsonPath string) (SourceLineToConfig, error) {
+// loadConfigTree 加载 configtree.json 并返回依赖树
+func loadConfigTree(jsonPath string) (map[string][]string, error) {
+    data, err := os.ReadFile(jsonPath)
+    if err != nil {
+        return nil, fmt.Errorf("failed to read configtree.json: %v", err)
+    }
+
+    var tree map[string][]string
+    if err := json.Unmarshal(data, &tree); err != nil {
+        return nil, fmt.Errorf("failed to unmarshal configtree.json: %v", err)
+    }
+
+    return tree, nil
+}
+
+func loadSourceLineToConfig(jsonPath string, configTree map[string][]string) (SourceLineToConfig, error) {
     data, err := os.ReadFile(jsonPath)
     if err != nil {
         return nil, fmt.Errorf("failed to read file: %v", err)
@@ -295,17 +304,31 @@ func loadSourceLineToConfig(jsonPath string) (SourceLineToConfig, error) {
                 log.Logf(0, "Invalid line numbers in range: %s", lineRangeStr)
                 continue
             }
+			extendedConfigs := make(map[string]bool)
+            for _, cfg := range configs {
+                extendedConfigs[cfg] = true
+                // 添加相关的 CONFIG
+                if related, ok := configTree[cfg]; ok {
+                    for _, r := range related {
+                        extendedConfigs[r] = true
+                    }
+                }
+            }
+
+            finalConfigs := make([]string, 0, len(extendedConfigs))
+            for cfg := range extendedConfigs {
+                finalConfigs = append(finalConfigs, cfg)
+            }
             result[file] = append(result[file], LineRangeConfig{
                 StartLine: start,
                 EndLine:   end,
-                Configs:   configs,
+                Configs:   finalConfigs,
             })
         }
     }
 
     return result, nil
 }
-
 
 // PrintSourceLineToConfig_debug 打印 sourceLineToConfig 的内容，用于调试
 func (f *Fuzzer) PrintSourceLineToConfig_debug() string {
@@ -521,7 +544,11 @@ func main() {
 
 	
 	// 读取sourceline2config
-	sourceLineToConfig, err := loadSourceLineToConfig("/home/sourceline2config.json")
+	configTree, err := loadConfigTree("/home/configtree.json")
+	if err != nil {
+	    log.Fatalf("Failed to load configtree.json: %v", err)
+	}
+	sourceLineToConfig, err := loadSourceLineToConfig("/home/sourceline2config.json", configTree)
 	if err != nil {
 	    log.Fatalf("Failed to load sourceline2config.json: %v", err)
 	}
@@ -861,7 +888,7 @@ func (fuzzer *Fuzzer) updateSyscallPair_debug(p *prog.Prog, addrs []uint32, allC
 		// 3-1 将allCover中的每个syscall的每个cover都转换成对应的source-line,并把source-line对应到Config
 		fmt.Fprintf(file, "[updateSyscallPair_debug] 3-1: uint32 cover -> source:line cover -> config cover\n")
 		vmlinux := "/home/vmlinux"
-		allConfig := make(map[*prog.Syscall]map[string]struct{})
+		allConfigAddrs := make(map[string]map[*prog.Syscall][]uint32)
         for syscall, coverAddrs := range allCover {
             fmt.Fprintf(file, "  Syscall: %s\n", syscall.Name)
             // 转成64位地址字符串
@@ -900,15 +927,31 @@ func (fuzzer *Fuzzer) updateSyscallPair_debug(p *prog.Prog, addrs []uint32, allC
 						configs := fuzzer.line2Config(source, lineNum)
 						if len(configs) > 0 {
 						    for _, config := range configs {
-						        if allConfig[syscall] == nil {
-						            allConfig[syscall] = make(map[string]struct{})
+						        if _, ok := allConfigAddrs[config]; !ok {
+						            allConfigAddrs[config] = make(map[*prog.Syscall][]uint32)
 						        }
-						        if _, exists := allConfig[syscall][config]; !exists {
-						            allConfig[syscall][config] = struct{}{}
-						            fmt.Fprintf(file, "      [Line2Config_debug] config: %s\n", config)
+							
+						        if allConfigAddrs[config][syscall] == nil {
+						            allConfigAddrs[config][syscall] = []uint32{}
 						        }
+							
+						        // 添加当前 addr32 到 config->syscall 的地址列表
+						        allConfigAddrs[config][syscall] = append(allConfigAddrs[config][syscall], coverAddrs[i])
+						        fmt.Fprintf(file, "      [Line2Config_debug] config: %s at addr 0x%08x\n", config, coverAddrs[i])
 						    }
 						}
+						// configs := fuzzer.line2Config(source, lineNum)
+						// if len(configs) > 0 {
+						//     for _, config := range configs {
+						//         if allConfig[syscall] == nil {
+						//             allConfig[syscall] = make(map[string]struct{})
+						//         }
+						//         if _, exists := allConfig[syscall][config]; !exists {
+						//             allConfig[syscall][config] = struct{}{}
+						//             fmt.Fprintf(file, "      [Line2Config_debug] config: %s\n", config)
+						//         }
+						//     }
+						// }
                     } else {
                         fmt.Fprintf(file, "    addr2line(%s) parse error\n", addrList[i])
                     }
@@ -916,34 +959,67 @@ func (fuzzer *Fuzzer) updateSyscallPair_debug(p *prog.Prog, addrs []uint32, allC
             }
         }
 
-		// 3-2 检查 allConfig，若两个 syscall 的 configs 有交集，则插入到 ChoiceTable 的 SyscallPair 字段
-		fmt.Fprintf(file, "[updateSyscallPair_debug] 3-2: check config intersection\n")
-		for sysA, configsA := range allConfig {
-		    for sysB, configsB := range allConfig {
-		        if sysA == sysB {
-		            continue
-		        }
-		        // 检查交集
-		        for config := range configsA {
-		            if _, ok := configsB[config]; ok {
-		                // 有交集，插入到 ChoiceTable 的 SyscallPair
-		                // 检查是否已存在
-               			exists := false
-               			for _, info := range fuzzer.choiceTable.SyscallPair[sysA] {
-               			    if info.Relate == sysB {
-               			        exists = true
-               			        break
-               			    }
-               			}
-               			if !exists {
-               			    fuzzer.choiceTable.SyscallPair[sysA] = append(fuzzer.choiceTable.SyscallPair[sysA], &prog.SyscallPairInfo_debug{
-               			        Relate:   sysB,
-               			        Verified: false,
-               			        Freq:     0,
-               			        Addr:     0,
-               			    })
-               			    fmt.Fprintf(file, "    [config-intersect] %s <-> %s via config %s\n", sysA.Name, sysB.Name, config)
-               			}
+		// 3-2 检查 allConfigAddrs，若两个 syscall 的 configs 有交集，就为其构造 syscall pair 并记录具体的 addr
+		fmt.Fprintf(file, "[updateSyscallPair_debug] 3-2: check config intersection with accurate addresses\n")
+			
+		// 遍历每条 CONFIG 对应的不同 syscall 触发点
+		for _, syscallToAddrList := range allConfigAddrs {
+		    // 把具有相同 CONFIG 的 syscall 列出来
+		    syscalls := make([]*prog.Syscall, 0, len(syscallToAddrList))
+		    for syscall := range syscallToAddrList {
+		        syscalls = append(syscalls, syscall)
+		    }
+		
+		    // 两两配对比较
+		    for i := 0; i < len(syscalls); i++ {
+		        sysA := syscalls[i]
+		        addrsA := syscallToAddrList[sysA]
+			
+		        for j := i + 1; j < len(syscalls); j++ {
+		            sysB := syscalls[j]
+		            addrsB := syscallToAddrList[sysB]
+				
+		            // 将每条 addr 独立建立 pair，例如:
+		            for _, addrA := range addrsA {
+		                for _, addrB := range addrsB {
+		                    // 插入 <sysA -> sysB, addrA>
+		                    exists := false
+		                    for _, info := range fuzzer.choiceTable.SyscallPair[sysA] {
+		                        if info.Relate == sysB && info.Addr == addrA {
+		                            exists = true
+		                            info.Freq++
+		                            break
+		                        }
+		                    }
+		                    if !exists {
+		                        fuzzer.choiceTable.SyscallPair[sysA] = append(fuzzer.choiceTable.SyscallPair[sysA], &prog.SyscallPairInfo_debug{
+		                            Relate:   sysB,
+		                            Verified: true,
+		                            Freq:     1,
+		                            Addr:     addrA,
+		                        })
+		                        fmt.Fprintf(file, "    [insert via shared config] %s -> %s (addr:%08x)\n", sysA.Name, sysB.Name, addrA)
+		                    }
+						
+		                    // 插入 <sysB -> sysA, addrB>
+		                    exists = false
+		                    for _, info := range fuzzer.choiceTable.SyscallPair[sysB] {
+		                        if info.Relate == sysA && info.Addr == addrB {
+		                            exists = true
+		                            info.Freq++
+		                            break
+		                        }
+		                    }
+		                    if !exists {
+		                        fuzzer.choiceTable.SyscallPair[sysB] = append(fuzzer.choiceTable.SyscallPair[sysB], &prog.SyscallPairInfo_debug{
+		                            Relate:   sysA,
+		                            Verified: true,
+		                            Freq:     1,
+		                            Addr:     addrB,
+		                        })
+		                        fmt.Fprintf(file, "    [insert via shared config] %s -> %s (addr:%08x)\n", sysB.Name, sysA.Name, addrB)
+		                    }
+		                }
 		            }
 		        }
 		    }

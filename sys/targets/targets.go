@@ -743,7 +743,7 @@ func (target *Target) Timeouts(slowdown int) Timeouts {
 		timeouts.NoOutput = 30 * time.Minute
 	}
 	if timeouts.VMRunningTime == 0 {
-		timeouts.VMRunningTime = time.Hour
+		timeouts.VMRunningTime = 24*time.Hour
 	}
 	timeouts.Syscall *= time.Duration(slowdown)
 	timeouts.Program *= timeouts.Scale
