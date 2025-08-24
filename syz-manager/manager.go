@@ -747,6 +747,28 @@ func (mgr *Manager) runInstanceInner(index int, instanceName string) (*report.Re
 		}
 	}
 
+	// 在 runInstanceInner 中，executorBin 复制成功之后，启动 fuzzer 之前插入：
+	extraFiles := []string{
+	    "/home/jiakai/riscv64-linux/toqemu/vmlinux",
+	    "/home/jiakai/riscv64-linux/toqemu/syscallpair.json",
+	    "/home/jiakai/riscv64-linux/toqemu/sourceline2config.json",
+	    "/home/jiakai/riscv64-linux/toqemu/configtree.json",
+	}
+
+	for _, hostSrc := range extraFiles {
+	    if !osutil.IsExist(hostSrc) {
+	        // 主机上没有该文件则跳过
+	        log.Logf(0, "mgr: extra file %v does not exist on host, skipping", hostSrc)
+	        continue
+	    }
+	    vmDst, err := inst.Copy(hostSrc)
+	    if err != nil {
+	        return nil, nil, fmt.Errorf("failed to copy extra file %v: %v", hostSrc, err)
+	    }
+	    // vmDst 是文件在 VM 上的路径
+	    log.Logf(1, "mgr: copied extra file %v -> %v", hostSrc, vmDst)
+	}
+
 	fuzzerV := 0
 	procs := mgr.cfg.Procs
 	if *flagDebug {

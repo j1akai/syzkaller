@@ -544,11 +544,11 @@ func main() {
 
 	
 	// 读取sourceline2config
-	configTree, err := loadConfigTree("/home/configtree.json")
+	configTree, err := loadConfigTree("/home/fuzzdir/configtree.json")
 	if err != nil {
 	    log.Fatalf("Failed to load configtree.json: %v", err)
 	}
-	sourceLineToConfig, err := loadSourceLineToConfig("/home/sourceline2config.json", configTree)
+	sourceLineToConfig, err := loadSourceLineToConfig("/home/fuzzdir/sourceline2config.json", configTree)
 	if err != nil {
 	    log.Fatalf("Failed to load sourceline2config.json: %v", err)
 	}
@@ -887,7 +887,7 @@ func (fuzzer *Fuzzer) updateSyscallPair_debug(p *prog.Prog, addrs []uint32, allC
 
 		// 3-1 将allCover中的每个syscall的每个cover都转换成对应的source-line,并把source-line对应到Config
 		fmt.Fprintf(file, "[updateSyscallPair_debug] 3-1: uint32 cover -> source:line cover -> config cover\n")
-		vmlinux := "/home/vmlinux"
+		vmlinux := "/home/fuzzdir/vmlinux"
 		allConfigAddrs := make(map[string]map[*prog.Syscall][]uint32)
         for syscall, coverAddrs := range allCover {
             fmt.Fprintf(file, "  Syscall: %s\n", syscall.Name)
@@ -910,8 +910,8 @@ func (fuzzer *Fuzzer) updateSyscallPair_debug(p *prog.Prog, addrs []uint32, allC
                 results := strings.Split(strings.TrimSpace(string(out)), "\n")
                 for i, res := range results {
                     // 只保留相对路径
-                    if idx := strings.Index(res, "/home/jiakai/linux/"); idx != -1 {
-                        res = res[idx+len("/home/jiakai/linux/"):]
+                    if idx := strings.Index(res, "/home/jiakai/riscv64-linux/linux/"); idx != -1 {
+                        res = res[idx+len("/home/jiakai/riscv64-linux/linux/"):]
                     }
                     if idx := strings.Index(res, "./"); idx != -1 {
                         res = res[idx+len("./"):]
