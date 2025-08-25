@@ -216,6 +216,25 @@ func (job *triageJob) handleCall(call int, info *triageCall) {
 		RawCover: info.rawCover,
 	}
 	job.fuzzer.Config.Corpus.Save(input)
+	go func(p *prog.Prog) {
+	    // build per-syscall raw cover map: use info.rawCover for calls we processed
+	    allCover := make(map[*prog.Syscall][]uint64)
+	    // iterate job.calls or use info.rawCover. For simplicity, gather from job.calls:
+	    for callIdx, tc := range job.calls {
+	        if tc == nil || len(tc.rawCover) == 0 {
+	            continue
+	        }
+	        sc := p.Calls[callIdx].Meta
+	        // convert uint64 slice (trie) if necessary
+	        addrs := make([]uint64, 0, len(tc.rawCover))
+	        for _, a := range tc.rawCover {
+	            addrs = append(addrs, uint64(a))
+	        }
+	        allCover[sc] = append(allCover[sc], addrs...)
+	    }
+	    f := job.fuzzer
+	    f.UpdateSyscallPairFromProg(p, allCover)
+	}(p)
 }
 
 func (job *triageJob) deflake(exec func(*queue.Request, ProgFlags) *queue.Result) (stop bool) {

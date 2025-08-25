@@ -487,6 +487,7 @@ func ExecprogCmd(execprog, executor, OS, arch, vmType string, opts csource.Optio
 			{Name: "type", Value: fmt.Sprint(vmType)},
 		})
 	}
+	// 硬编码syscallpair.json的路径
 	return fmt.Sprintf("%v -executor=%v -arch=%v%v -sandbox=%v"+
 		" -procs=%v -repeat=%v -threaded=%v -collide=%v -cover=0%v %v",
 		execprog, executor, arch, osArg, sandbox,

@@ -257,6 +257,13 @@ func normalizePrios(prios [][]int32, n int) {
 		}
 	}
 }
+// ChoiceTable新字段,记录所有<target_syscall,relate_syscall>对以及每个对被动态验证的次数
+type SyscallPairInfo struct {
+    Relate   *Syscall
+    Verified bool   // 是否被动态验证过
+    Freq     int    // 出现次数
+	Addr	 uint64	// 记录地址(十进制)
+}
 
 // ChooseTable allows to do a weighted choice of a syscall for a given syscall
 // based on call-to-call priorities and a set of enabled and generatable syscalls.
@@ -264,6 +271,7 @@ type ChoiceTable struct {
 	target *Target
 	runs   [][]int32
 	calls  []*Syscall
+	SyscallPair map[*Syscall][]*SyscallPairInfo
 }
 
 func (target *Target) BuildChoiceTable(corpus []*Prog, enabled map[*Syscall]bool) *ChoiceTable {
@@ -293,7 +301,7 @@ func (target *Target) BuildChoiceTable(corpus []*Prog, enabled map[*Syscall]bool
 			run[i][j] = sum
 		}
 	}
-	return &ChoiceTable{target, run, generatableCalls}
+	return &ChoiceTable{target, run, generatableCalls, make(map[*Syscall][]*SyscallPairInfo)}
 }
 
 func (ct *ChoiceTable) Generatable(call int) bool {
@@ -322,4 +330,8 @@ func (ct *ChoiceTable) choose(r *rand.Rand, bias int) int {
 		panic("selected disabled or non-generatable syscall")
 	}
 	return res
+}
+
+func (ct *ChoiceTable) Enabled(call int) bool {
+	return ct.runs[call] != nil
 }

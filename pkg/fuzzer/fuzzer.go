@@ -11,6 +11,11 @@ import (
 	"sort"
 	"sync"
 	"time"
+	"os"
+	"encoding/json"
+	"strings"
+	"strconv"
+	"os/exec"
 
 	"github.com/google/syzkaller/pkg/corpus"
 	"github.com/google/syzkaller/pkg/csource"
@@ -39,7 +44,292 @@ type Fuzzer struct {
 	ctMu         sync.Mutex // TODO: use RWLock.
 	ctRegenerate chan struct{}
 
+	SourceLineToConfig SourceLineToConfig
+	SrcLineMu          sync.RWMutex
+	Vmlinux string
+
 	execQueues
+}
+
+type LineRangeConfig struct {
+    StartLine int
+    EndLine   int
+    Configs   []string
+}
+type SourceLineToConfig map[string][]LineRangeConfig
+
+// LoadConfigTree loads configtree.json -> map[string][]string
+func LoadConfigTree(jsonPath string) (map[string][]string, error) {
+    if jsonPath == "" {
+        return nil, nil
+    }
+    data, err := os.ReadFile(jsonPath)
+    if err != nil {
+        return nil, fmt.Errorf("read configtree.json: %w", err)
+    }
+    var tree map[string][]string
+    if err := json.Unmarshal(data, &tree); err != nil {
+        return nil, fmt.Errorf("parse configtree.json: %w", err)
+    }
+    return tree, nil
+}
+
+// LoadSourceLineToConfig loads sourceline2config.json, expands related CONFIGs using configTree.
+func LoadSourceLineToConfig(jsonPath string, configTree map[string][]string) (SourceLineToConfig, error) {
+    res := make(SourceLineToConfig)
+    if jsonPath == "" {
+        return res, nil
+    }
+    data, err := os.ReadFile(jsonPath)
+    if err != nil {
+        return nil, fmt.Errorf("read sourceline2config: %w", err)
+    }
+    var raw map[string]map[string][]string
+    if err := json.Unmarshal(data, &raw); err != nil {
+        return nil, fmt.Errorf("parse sourceline2config: %w", err)
+    }
+    for file, ranges := range raw {
+        for rstr, cfgs := range ranges {
+            parts := strings.Split(rstr, "-")
+            if len(parts) != 2 {
+                continue
+            }
+            start, err1 := strconv.Atoi(parts[0])
+            end, err2 := strconv.Atoi(parts[1])
+            if err1 != nil || err2 != nil {
+                continue
+            }
+            // expand related configs using configTree
+            ext := make(map[string]bool)
+            for _, c := range cfgs {
+                ext[c] = true
+                if rel, ok := configTree[c]; ok {
+                    for _, r := range rel {
+                        ext[r] = true
+                    }
+                }
+            }
+            final := make([]string, 0, len(ext))
+            for c := range ext {
+                final = append(final, c)
+            }
+            res[file] = append(res[file], LineRangeConfig{
+                StartLine: start,
+                EndLine:   end,
+                Configs:   final,
+            })
+        }
+    }
+    return res, nil
+}
+
+// InjectSeedsFromSyscallPairJSON parses JSON and generates seeds using current choice table.
+// It then converts them to Candidate and calls AddCandidates.
+func (f *Fuzzer) InjectSeedsFromSyscallPairJSON(jsonPath string) error {
+    if jsonPath == "" {
+        return nil
+    }
+    data, err := os.ReadFile(jsonPath)
+    if err != nil {
+        return fmt.Errorf("read syscall pair json: %w", err)
+    }
+    var deps []struct {
+        Targets []string `json:"Target"`
+        Relate  []string `json:"Relate"`
+        Addr    uint32   `json:"Addr"`
+    }
+    if err := json.Unmarshal(data, &deps); err != nil {
+        return fmt.Errorf("parse syscall pair json: %w", err)
+    }
+
+    ct := f.ChoiceTable()
+    if ct == nil {
+        return fmt.Errorf("choice table not ready")
+    }
+    rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
+    generated := make(map[string]bool)
+    var seeds []*prog.Prog
+    for _, dep := range deps {
+        for _, tname := range dep.Targets {
+            tgt := f.target.SyscallMap[tname]
+            if tgt == nil || !ct.Enabled(tgt.ID) {
+                continue
+            }
+            for _, rname := range dep.Relate {
+                rel := f.target.SyscallMap[rname]
+                if rel == nil || !ct.Enabled(rel.ID) {
+                    continue
+                }
+                key := tname + ":" + rname
+                if generated[key] {
+                    continue
+                }
+                generated[key] = true
+
+                p, err := prog.GenerateSeedFromSyscallPair(f.target, ct, tgt, rel, rnd)
+                if err != nil {
+                    f.Logf(0, "failed to generate seed for %v->%v: %v", tname, rname, err)
+                    continue
+                }
+                seeds = append(seeds, p)
+            }
+        }
+    }
+
+    if len(seeds) == 0 {
+        return nil
+    }
+    // Convert to Candidate type and add
+    cands := make([]Candidate, 0, len(seeds))
+    for _, p := range seeds {
+        cands = append(cands, Candidate{
+            Prog:  p,
+            Flags: 0, // set flags as needed
+        })
+    }
+    f.AddCandidates(cands)
+    f.Logf(0, "injected %d seeds from %s", len(seeds), jsonPath)
+    return nil
+}
+
+// UpdateSyscallPairFromProg: given prog p and a mapping allCover (per-syscall list of addresses),
+// map addresses to source:line using addr2line on f.vmlinux, consult sourceLineToConfig,
+// and update choice table's SyscallPair accordingly.
+//
+// allCover: map[*prog.Syscall][]uint64 - addresses (as uint64 or uint32 depending on your raw cover)
+func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Syscall][]uint64) {
+    if len(allCover) == 0 {
+        return
+    }
+    f.SrcLineMu.RLock()
+    s2c := f.SourceLineToConfig
+    vmlinux := f.Vmlinux
+    f.SrcLineMu.RUnlock()
+
+    if vmlinux == "" || s2c == nil {
+        f.Logf(1, "no vmlinux or sourceLineToConfig configured, skipping update")
+        return
+    }
+
+    // Build address list (strings) for addr2line.
+    var addrs []string
+    addrToPair := make(map[string]struct{ s string; off uint64 }) // optional map for tracking
+    for syscall, cov := range allCover {
+        for _, a := range cov {
+            // convert to hex 0x... string; your addr width may vary
+            addrStr := fmt.Sprintf("0x%x", a)
+            addrs = append(addrs, addrStr)
+            addrToPair[addrStr] = struct{ s string; off uint64 }{ s: syscall.Name, off: a }
+        }
+    }
+    if len(addrs) == 0 {
+        return
+    }
+    // call addr2line: -e vmlinux addr1 addr2 ...
+    args := append([]string{"-e", vmlinux, "-f", "-i"}, addrs...)
+    cmd := exec.Command("addr2line", args...)
+    out, err := cmd.Output()
+    if err != nil {
+        f.Logf(0, "addr2line failed: %v", err)
+        return
+    }
+    lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+    // addr2line produces function/source:line pairs; we need source:line lines positions.
+    // Parse results and build map config -> syscall -> []addr
+    configToSyscallAddrs := make(map[string]map[*prog.Syscall][]uint64)
+    // We'll iterate in same order as addrs.
+    idx := 0
+    for i := 0; i+1 < len(lines) && idx < len(addrs); i += 2 {
+        // lines[i] = function name, lines[i+1] = file:line or "??:0"
+        srcLine := lines[i+1]
+        // parse file:line
+        colon := strings.LastIndex(srcLine, ":")
+        if colon == -1 {
+            idx++
+            continue
+        }
+        file := srcLine[:colon]
+        lineStr := srcLine[colon+1:]
+        lineNum, err := strconv.Atoi(lineStr)
+        if err != nil {
+            idx++
+            continue
+        }
+        // normalize file path if needed (strip prefix)
+        // now find configs for this file/line:
+        if ranges, ok := s2c[file]; ok {
+            for _, r := range ranges {
+                if lineNum >= r.StartLine && lineNum <= r.EndLine {
+                    for _, cfg := range r.Configs {
+                        // find syscall for this addr: we need to map addrs[idx] -> which syscall.
+                        // This simple code loops allCover to find which syscall has this addr.
+                        addrVal, _ := strconv.ParseUint(strings.TrimPrefix(addrs[idx], "0x"), 16, 64)
+                        for sc, cov := range allCover {
+                            for _, a := range cov {
+                                if a == addrVal {
+                                    if _, ok := configToSyscallAddrs[cfg]; !ok {
+                                        configToSyscallAddrs[cfg] = make(map[*prog.Syscall][]uint64)
+                                    }
+                                    // append address
+                                    configToSyscallAddrs[cfg][sc] = append(configToSyscallAddrs[cfg][sc], uint64(a))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        idx++
+    }
+
+    // Now update choice table: for each config that ties together multiple syscalls add pair infos.
+    f.ctMu.Lock()
+    defer f.ctMu.Unlock()
+    ct := f.ct
+    if ct == nil {
+        return
+    }
+    for _, scMap := range configToSyscallAddrs {
+        // make slice of syscalls in this config
+        syscalls := make([]*prog.Syscall, 0, len(scMap))
+        for s := range scMap {
+            syscalls = append(syscalls, s)
+        }
+        for i := 0; i < len(syscalls); i++ {
+            sa := syscalls[i]
+            addrsA := scMap[sa]
+            for j := i + 1; j < len(syscalls); j++ {
+                sb := syscalls[j]
+                addrsB := scMap[sb]
+                // for each address pair insert both directions
+                for _, a := range addrsA {
+                    // ensure ct.SyscallPair map exists
+                    if ct.SyscallPair == nil {
+                        ct.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo)
+                    }
+                    // insert sa -> sb with addr a (uint32 if your struct expects)
+                    ct.SyscallPair[sa] = append(ct.SyscallPair[sa], &prog.SyscallPairInfo{
+                        Relate:   sb,
+                        Verified: true,
+                        Freq:     1,
+                        Addr:     a,
+                    })
+                }
+                for _, b := range addrsB {
+                    if ct.SyscallPair == nil {
+                        ct.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo)
+                    }
+                    ct.SyscallPair[sb] = append(ct.SyscallPair[sb], &prog.SyscallPairInfo{
+                        Relate:   sa,
+                        Verified: true,
+                        Freq:     1,
+                        Addr:     b,
+                    })
+                }
+            }
+        }
+    }
+    f.Logf(0, "updated choice table syscall pairs from program %v", p)
 }
 
 func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,

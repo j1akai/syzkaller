@@ -33,3 +33,37 @@ func (target *Target) Generate(rs rand.Source, ncalls int, ct *ChoiceTable) *Pro
 	p.debugValidate()
 	return p
 }
+
+func GenerateSeedFromSyscallPair(target *Target, choiceTable *ChoiceTable, targetCall *Syscall, relateCall *Syscall, rnd *rand.Rand) (*Prog, error){
+    p := &Prog{Target: target}
+    r := newRand(target, rnd)
+    s := newState(target, choiceTable, nil)
+
+    // 把relate_syscall包含进种子
+    calls := r.generateParticularCall(s, relateCall)
+    for _, c := range calls {
+        s.analyze(c)
+        p.Calls = append(p.Calls, c)
+    }
+
+    // 把target_syscall包含进种子
+    calls = r.generateParticularCall(s, targetCall)
+    for _, c := range calls {
+        s.analyze(c)
+        p.Calls = append(p.Calls, c)
+    }
+
+	for len(p.Calls) < 7 {
+		calls := r.generateCall(s, p, len(p.Calls))
+		for _, c := range calls {
+			s.analyze(c)
+			p.Calls = append(p.Calls, c)
+		}
+	}
+
+    // 检查语义及有效性
+    p.sanitizeFix()
+    p.debugValidate()
+
+    return p, nil
+}

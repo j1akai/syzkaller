@@ -230,6 +230,12 @@ type Config struct {
 
 	// Implementation details beyond this point. Filled after parsing.
 	Derived `json:"-"`
+
+	// new fields for external seeds / mapping
+	SyscallPairJSON      string `json:"syscall_pair_json,omitempty"`
+	SourceLine2ConfigJSON string `json:"sourceline2config_json,omitempty"`
+	ConfigTreeJSON       string `json:"configtree_json,omitempty"`
+	VmlinuxPath          string `json:"vmlinux_path,omitempty"`
 }
 
 // These options are not guaranteed to be backward/forward compatible and

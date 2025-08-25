@@ -37,6 +37,7 @@ var DefaultMutateOpts = MutateOpts{
 	InsertWeight:     100,
 	MutateArgWeight:  100,
 	RemoveCallWeight: 10,
+	InsertWithDependencyWeight: 200,
 }
 
 type MutateOpts struct {
@@ -47,10 +48,11 @@ type MutateOpts struct {
 	InsertWeight       int
 	MutateArgWeight    int
 	RemoveCallWeight   int
+	InsertWithDependencyWeight int
 }
 
 func (o MutateOpts) weight() int {
-	return o.SquashWeight + o.SpliceWeight + o.InsertWeight + o.MutateArgWeight + o.RemoveCallWeight
+	return o.SquashWeight + o.SpliceWeight + o.InsertWeight + o.MutateArgWeight + o.RemoveCallWeight + o.InsertWithDependencyWeight
 }
 
 func (p *Prog) MutateWithOpts(rs rand.Source, ncalls int, ct *ChoiceTable, noMutate map[int]bool,
@@ -72,6 +74,11 @@ func (p *Prog) MutateWithOpts(rs rand.Source, ncalls int, ct *ChoiceTable, noMut
 	}
 	for stop, ok := false, false; !stop; stop = ok && len(p.Calls) != 0 && r.oneOf(opts.ExpectedIterations) {
 		val := r.Intn(totalWeight)
+		val -= opts.InsertWithDependencyWeight
+		if val < 0 {
+			ok = ctx.insertCallWithDependency()
+			continue
+		}
 		val -= opts.SquashWeight
 		if val < 0 {
 			// Not all calls have anything squashable,
@@ -113,6 +120,81 @@ type mutator struct {
 	noMutate map[int]bool // Set of IDs of syscalls which should not be mutated.
 	corpus   []*Prog      // The entire corpus, including original program p.
 	opts     MutateOpts
+}
+
+func (ctx *mutator) insertCallWithDependency() bool {
+	// 老种子长度不能超过预定义的最大种子长度,否则不变异
+	p, r := ctx.p, ctx.r
+    if len(p.Calls) >= ctx.ncalls {
+        return false
+    }
+	
+	// 在老种子里随机选一个位置idx
+    idx := r.biasedRand(len(p.Calls)+1, 5)
+    var c *Call
+    if idx < len(p.Calls) {
+        c = p.Calls[idx]
+    }
+    s := analyze(ctx.ct, ctx.corpus, p, c)
+
+    var mostVerified *struct {
+        target *Syscall
+        relate *Syscall
+        freq   int
+        insertIdx int
+    }
+
+	// 从idx开始往前遍历每一个syscall
+    for i := idx - 1; i >= 0; i-- {
+        call := p.Calls[i]
+		// 判断该syscall是不是target_syscall,如果不是,则继续往前遍历
+        infos, ok := ctx.ct.SyscallPair[call.Meta]
+        if !ok || len(infos) == 0 {
+            continue
+        }
+		rand.Shuffle(len(infos), func(i, j int) {
+		    infos[i], infos[j] = infos[j], infos[i]
+		})
+		// 遍历依赖于该syscall的relate_syscall
+        for _, info := range infos {
+			// 看当前target和relate是已被验证,如果未被验证,则把relate插入到idx前面
+            if !info.Verified {
+                calls := r.generateParticularCall(s, info.Relate)
+                p.insertBefore(c, calls)
+                for len(p.Calls) > ctx.ncalls {
+                    p.RemoveCall(idx)
+                }
+                return true
+            }
+			// 记录系统调用对出现在种子库中次数最多的那一对
+            if mostVerified == nil || info.Freq > mostVerified.freq {
+                mostVerified = &struct {
+                    target *Syscall
+                    relate *Syscall
+                    freq   int
+                    insertIdx int
+                }{call.Meta, info.Relate, info.Freq, idx}
+            }
+        }
+    }
+
+	// 如果前面找到的<target,relate>都已经被验证,那么选取被验证次数最多的那一对
+    if mostVerified != nil {
+        calls := r.generateParticularCall(s, mostVerified.relate)
+        p.insertBefore(c, calls)
+        for len(p.Calls) > ctx.ncalls {
+            p.RemoveCall(idx)
+        }
+        return true
+    }
+
+	// 如果老种子中不存在target_syscall,那么就随机挑选系统调用进行插入,此时不再利用依赖关系
+    calls := r.generateCall(s, p, idx)
+    p.insertBefore(c, calls)
+    for len(p.Calls) > ctx.ncalls {
+        p.RemoveCall(idx)
+    }
+    return true
 }
 
 // This function selects a random other program p0 out of the corpus, and
