@@ -92,24 +92,32 @@ func (target *Target) prepareEnabledSyscalls(corpus []*Prog, enabled map[*Syscal
 }
 
 func (target *Target) calcStaticPriorities(enabled map[*Syscall]bool) [][]int32 {
-	uses := target.calcResourceUsage(enabled)
+	// uses := target.calcResourceUsage(enabled)
 	prios := make([][]int32, len(target.Syscalls))
 	for i := range prios {
 		prios[i] = make([]int32, len(target.Syscalls))
 	}
-	for _, weights := range uses {
-		for _, w0 := range weights {
-			for _, w1 := range weights {
-				if w0.call == w1.call {
-					// Self-priority is assigned below.
-					continue
-				}
-				// The static priority is assigned based on the direction of arguments. A higher priority will be
-				// assigned when c0 is a call that produces a resource and c1 a call that uses that resource.
-				prios[w0.call][w1.call] += w0.inout*w1.in*3/2 + w0.inout*w1.inout
-			}
-		}
-	}
+	// for _, weights := range uses {
+	// 	for _, w0 := range weights {
+	// 		for _, w1 := range weights {
+	// 			if w0.call == w1.call {
+	// 				// Self-priority is assigned below.
+	// 				continue
+	// 			}
+	// 			// The static priority is assigned based on the direction of arguments. A higher priority will be
+	// 			// assigned when c0 is a call that produces a resource and c1 a call that uses that resource.
+	// 			prios[w0.call][w1.call] += w0.inout*w1.in*3/2 + w0.inout*w1.inout
+	// 		}
+	// 	}
+	// }
+	for c0 := range enabled {
+        for c1 := range enabled {
+            if c0 == c1 {
+                continue // 跳过自优先级处理
+            }
+            prios[c0.ID][c1.ID] = 1
+        }
+    }
 	// The value assigned for self-priority (call wrt itself) have to be high, but not too high.
 	for c := range enabled {
 		id, pp := c.ID, prios[c.ID]

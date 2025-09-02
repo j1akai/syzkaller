@@ -207,6 +207,40 @@ const (
 	phaseTriagedHub
 )
 
+// 每隔6小时导出一次当前 corpus 覆盖的 PC
+func (mgr *Manager) periodicCoverageDump() {
+    ticker := time.NewTicker(6 * time.Hour)
+    defer ticker.Stop()
+
+    start := time.Now()
+    index := 1
+    for {
+        select {
+        case <-ticker.C:
+            if mgr.corpus == nil {
+                continue
+            }
+            pcs := mgr.corpus.PCs()
+            file := filepath.Join(mgr.cfg.Workdir,
+                fmt.Sprintf("coverage_%dh.log", index*6))
+            index++
+            f, err := os.Create(file)
+            if err != nil {
+                log.Logf(0, "failed to create coverage dump file: %v", err)
+                continue
+            }
+            for _, pc := range pcs {
+                fmt.Fprintf(f, "0x%X\n", pc)
+            }
+            f.Close()
+            log.Logf(0, "coverage dump written to %s, total PCs=%d, elapsed=%v",
+                file, len(pcs), time.Since(start).Truncate(time.Second))
+        case <-vm.Shutdown: // 退出信号
+            return
+        }
+    }
+}
+
 func main() {
 	flag.Parse()
 	if !prog.GitRevisionKnown() {
@@ -1169,6 +1203,7 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 		}
 
 		fuzzerObj.AddCandidates(candidates)
+		go mgr.periodicCoverageDump()
 		mgr.fuzzer.Store(fuzzerObj)
 		mgr.http.Fuzzer.Store(fuzzerObj)
 

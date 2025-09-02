@@ -45,6 +45,12 @@ type FocusArea struct {
 	Weight   float64
 }
 
+func (corpus *Corpus) PCs() []uint64 {
+    corpus.mu.RLock()
+    defer corpus.mu.RUnlock()
+    return corpus.cover.Serialize()
+}
+
 func NewCorpus(ctx context.Context) *Corpus {
 	return NewMonitoredCorpus(ctx, nil)
 }
