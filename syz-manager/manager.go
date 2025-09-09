@@ -206,7 +206,38 @@ const (
 	// This is when we start reproducing crashes.
 	phaseTriagedHub
 )
+func (mgr *Manager) periodicCoverageDump() {
+    ticker := time.NewTicker(6 * time.Hour)
+    defer ticker.Stop()
 
+    start := time.Now()
+    index := 1
+    for {
+        select {
+        case <-ticker.C:
+            if mgr.corpus == nil {
+                continue
+            }
+            pcs := mgr.corpus.PCs()
+            file := filepath.Join(mgr.cfg.Workdir,
+                fmt.Sprintf("coverage_%dh.log", index*6))
+            index++
+            f, err := os.Create(file)
+            if err != nil {
+                log.Logf(0, "failed to create coverage dump file: %v", err)
+                continue
+            }
+            for _, pc := range pcs {
+                fmt.Fprintf(f, "0x%X\n", pc)
+            }
+            f.Close()
+            log.Logf(0, "coverage dump written to %s, total PCs=%d, elapsed=%v",
+                file, len(pcs), time.Since(start).Truncate(time.Second))
+        case <-vm.Shutdown: // 退出信号
+            return
+        }
+    }
+}
 func main() {
 	flag.Parse()
 	if !prog.GitRevisionKnown() {
@@ -1095,7 +1126,117 @@ func (mgr *Manager) BugFrames() (leaks, races []string) {
 	}
 	return
 }
+// ...existing code...
 
+// 定时统计协程
+func (mgr *Manager) periodicDepStats() {
+    ticker := time.NewTicker(time.Hour)
+	// ticker := time.NewTicker(5 * time.Minute)
+    defer ticker.Stop()
+    for {
+        select {
+        case <-ticker.C:
+            mgr.statDeps()
+        case <-vm.Shutdown:
+            return
+        }
+    }
+}
+
+// 统计当前种子库中的显式/隐式依赖对数
+// func (mgr *Manager) statDeps() {
+//     mgr.mu.Lock()
+//     defer mgr.mu.Unlock()
+//     fuzzer := mgr.fuzzer.Load()
+//     if fuzzer == nil {
+//         return
+//     }
+//     ct := fuzzer.ChoiceTable()
+//     if ct == nil {
+//         return
+//     }
+//     corpus := mgr.corpus
+//     if corpus == nil {
+//         return
+//     }
+//     explicitSet := make(map[[2]int]struct{})
+//     implicitSet := make(map[[2]int]struct{})
+//     for _, item := range corpus.Items() {
+//         p := item.Prog
+//         calls := p.Calls
+//         for i := 0; i < len(calls); i++ {
+//             for j := 0; j < len(calls); j++ {
+//                 if i == j {
+//                     continue
+//                 }
+//                 x := calls[i].Meta.ID
+//                 y := calls[j].Meta.ID
+// 				if ct.IsExplicitDep(x, y) {
+// 				    explicitSet[[2]int{x, y}] = struct{}{}
+// 				}
+// 				if ct.IsImplicitDep(x, y) {
+// 				    implicitSet[[2]int{x, y}] = struct{}{}
+// 				}
+//             }
+//         }
+//     }
+//     log.Logf(0, "种子库中显式依赖对数: %d, 隐式依赖对数: %d", len(explicitSet), len(implicitSet))
+// }
+func (mgr *Manager) statDeps() {
+    mgr.mu.Lock()
+    defer mgr.mu.Unlock()
+    fuzzer := mgr.fuzzer.Load()
+    if fuzzer == nil {
+        return
+    }
+    ct := fuzzer.ChoiceTable()
+    if ct == nil {
+        return
+    }
+    corpus := mgr.corpus
+    if corpus == nil {
+        return
+    }
+    explicitSet := make(map[[2]int]struct{})
+    implicitSet := make(map[[2]int]struct{})
+    explicitCount := make(map[[2]int]int)
+    implicitCount := make(map[[2]int]int)
+    for _, item := range corpus.Items() {
+        p := item.Prog
+        calls := p.Calls
+        for i := 0; i < len(calls); i++ {
+            for j := 0; j < len(calls); j++ {
+                if i == j {
+                    continue
+                }
+                x := calls[i].Meta.ID
+                y := calls[j].Meta.ID
+                key := [2]int{x, y}
+                if ct.IsExplicitDep(x, y) {
+                    explicitSet[key] = struct{}{}
+                    explicitCount[key]++
+                }
+                if ct.IsImplicitDep(x, y) {
+                    implicitSet[key] = struct{}{}
+                    implicitCount[key]++
+                }
+            }
+        }
+    }
+    // 统计总出现次数
+    totalExplicit := 0
+    for _, v := range explicitCount {
+        totalExplicit += v
+    }
+    totalImplicit := 0
+    for _, v := range implicitCount {
+        totalImplicit += v
+    }
+    log.Logf(0, "种子库中显式依赖对数: %d, 显式依赖出现次数: %d, 隐式依赖对数: %d, 隐式依赖出现次数: %d",
+        len(explicitSet), totalExplicit, len(implicitSet), totalImplicit)
+}
+
+// ...existing code...
 func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 	enabledSyscalls map[*prog.Syscall]bool) (queue.Source, error) {
 	if len(enabledSyscalls) == 0 {
@@ -1167,8 +1308,12 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 		        log.Logf(0, "seed inject failed: %v", err)
 		    }
 		}
-
+		go mgr.periodicDepStats()
 		fuzzerObj.AddCandidates(candidates)
+		go mgr.periodicCoverageDump()
+		directedCnt, _ := mgr.target.CountExplicitDeps(nil, enabledSyscalls)
+		enabledCount := len(enabledSyscalls)
+		log.Logf(0, "directed explicit deps: %d (max=%d)", directedCnt, enabledCount*(enabledCount-1))
 		mgr.fuzzer.Store(fuzzerObj)
 		mgr.http.Fuzzer.Store(fuzzerObj)
 

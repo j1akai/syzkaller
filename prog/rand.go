@@ -20,7 +20,7 @@ const (
 	RecommendedCalls = 30
 	// "Recommended" max number of calls in programs.
 	// If we receive longer programs from hub/corpus we discard them.
-	MaxCalls = 40
+	MaxCalls = 4000
 )
 
 type randGen struct {

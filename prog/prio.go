@@ -9,7 +9,49 @@ import (
 	"math/rand"
 	"slices"
 	"sort"
+	"github.com/google/syzkaller/pkg/log"
 )
+
+// CountExplicitDeps 统计“显式依赖”的有向对数量。
+// 显式依赖定义：存在某种资源 R，使得 A 对 R 为 inout/out（生产/修改），B 对 R 为 in（消费），则 (A -> B) 是一对显式依赖。
+// 参数：
+//   corpus: 可为 nil，仅用于一致性校验（与 prepareEnabledSyscalls 的行为对齐）
+//   enabled: 若为 nil，则默认所有可生成的 syscall 均参与统计（同 CalculatePriorities 的语义）
+// 返回：有向依赖对数量，以及去重后的有向依赖对集合（键为 [2]int{fromID, toID}）
+func (target *Target) CountExplicitDeps(corpus []*Prog, enabled map[*Syscall]bool) (int, map[[2]int]bool) {
+    // 与 CalculatePriorities/ calcResourceUsage 保持一致，只统计“可生成”的 syscalls。
+    enabledCalls := target.prepareEnabledSyscalls(corpus, enabled)
+
+    // 复用静态优先级的资源使用分析
+    uses := target.calcResourceUsage(enabledCalls)
+
+    // 用于去重的有向依赖对集合
+    deps := make(map[[2]int]bool)
+
+    for _, weights := range uses { // 每种资源对应的一组 syscall 权重
+        // 为了避免 O(n^2) 上的重复检查，先把生产者和消费者分开收集
+        var producers []int
+        var consumers []int
+        for _, w := range weights {
+            if w.inout > 0 {
+                producers = append(producers, w.call)
+            }
+            if w.in > 0 {
+                consumers = append(consumers, w.call)
+            }
+        }
+        // 对该资源上所有 (producer, consumer) 做笛卡尔积，排除自依赖
+        for _, p := range producers {
+            for _, c := range consumers {
+                if p == c {
+                    continue
+                }
+                deps[[2]int{p, c}] = true
+            }
+        }
+    }
+    return len(deps), deps
+}
 
 // Calulation of call-to-call priorities.
 // For a given pair of calls X and Y, the priority is our guess as to whether
@@ -106,7 +148,8 @@ func (target *Target) calcStaticPriorities(enabled map[*Syscall]bool) [][]int32 
 				}
 				// The static priority is assigned based on the direction of arguments. A higher priority will be
 				// assigned when c0 is a call that produces a resource and c1 a call that uses that resource.
-				prios[w0.call][w1.call] += w0.inout*w1.in*3/2 + w0.inout*w1.inout
+				// prios[w0.call][w1.call] += w0.inout*w1.in*3/2 + w0.inout*w1.inout
+				prios[w0.call][w1.call] += w0.inout*w1.in + w0.inout*w1.inout + w0.out*w1.in + w0.out*w1.inout
 			}
 		}
 	}
@@ -186,6 +229,7 @@ type weights struct {
 	call  int
 	in    int32
 	inout int32
+	out   int32
 }
 
 func noteUsage(uses map[string]map[int]weights, c *Syscall, weight int32, dir Dir, str string) {
@@ -199,13 +243,28 @@ func noteUsagef(uses map[string]map[int]weights, c *Syscall, weight int32, dir D
 	}
 	callWeight := uses[id][c.ID]
 	callWeight.call = c.ID
-	if dir != DirOut {
+	// if dir != DirOut {
+	// 	if weight > uses[id][c.ID].in {
+	// 		callWeight.in = weight
+	// 	}
+	// }
+	// if weight > uses[id][c.ID].inout {
+	// 	callWeight.inout = weight
+	// }
+	if dir == DirOut {
+		if weight > uses[id][c.ID].out {
+			callWeight.out = weight
+		}
+	}
+	if dir == DirIn {
 		if weight > uses[id][c.ID].in {
 			callWeight.in = weight
 		}
 	}
-	if weight > uses[id][c.ID].inout {
-		callWeight.inout = weight
+	if dir == DirInOut {
+		if weight > uses[id][c.ID].inout {
+			callWeight.inout = weight
+		}
 	}
 	uses[id][c.ID] = callWeight
 }
@@ -273,7 +332,51 @@ type ChoiceTable struct {
 	calls  []*Syscall
 	SyscallPair map[*Syscall][]*SyscallPairInfo
 }
+// IsExplicitDep 判断 x->y 是否为显式依赖
+func (ct *ChoiceTable) IsExplicitDep(x, y int) bool {
+    return ct != nil && x < len(ct.runs) && y < len(ct.runs[x]) && ct.runs[x] != nil && ct.runs[x][y] != 0
+}
 
+// IsImplicitDep 判断 x->y 是否为隐式依赖
+func (ct *ChoiceTable) IsImplicitDep(x, y int) bool {
+    if ct == nil || ct.SyscallPair == nil {
+        log.Logf(0, "IsImplicitDep: ct或SyscallPair为空")
+        return false
+    }
+    xsc := ct.target.Syscalls[x]
+    ysc := ct.target.Syscalls[y]
+    // log.Logf(0, "IsImplicitDep: 检查 %v(%d) -> %v(%d)", xsc.Name, x, ysc.Name, y)
+    // log.Logf(0, "IsImplicitDep: SyscallPair主键数量=%d", len(ct.SyscallPair))
+    yid := y
+    found := false
+    for _, pair := range ct.SyscallPair[xsc] {
+    	// log.Logf(0, "IsImplicitDep: 对应的relate数量=%d", len(ct.SyscallPair[xsc]))
+        if pair.Relate != nil {
+            // log.Logf(1, "IsImplicitDep: x=%v, Relate=%v(%d)", xsc.Name, pair.Relate.Name, pair.Relate.ID)
+            if pair.Relate.ID == yid {
+                // log.Logf(0, "IsImplicitDep: 命中 %v(%d) -> %v(%d)", xsc.Name, x, pair.Relate.Name, yid)
+                found = true
+            }
+        }
+    }
+    if found {
+        return true
+    }
+    // 反向再查一次
+    xid := x
+    for _, pair := range ct.SyscallPair[ysc] {
+    	// log.Logf(0, "IsImplicitDep: 对应的relate数量=%d", len(ct.SyscallPair[ysc]))
+        if pair.Relate != nil {
+            // log.Logf(1, "IsImplicitDep: y=%v, Relate=%v(%d)", ysc.Name, pair.Relate.Name, pair.Relate.ID)
+            if pair.Relate.ID == xid {
+                // log.Logf(0, "IsImplicitDep: 反向命中 %v(%d) -> %v(%d)", ysc.Name, y, pair.Relate.Name, xid)
+                return true
+            }
+        }
+    }
+    // log.Logf(0, "IsImplicitDep: 未命中 %v(%d) <-> %v(%d)", xsc.Name, x, ysc.Name, y)
+    return false
+}
 func (target *Target) BuildChoiceTable(corpus []*Prog, enabled map[*Syscall]bool) *ChoiceTable {
 	prios, enabledCalls := target.CalculatePriorities(corpus, enabled)
 	var generatableCalls []*Syscall
