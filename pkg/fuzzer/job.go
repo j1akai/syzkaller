@@ -85,6 +85,7 @@ type triageJob struct {
 	calls map[int]*triageCall
 
 	info *JobInfo
+	allCover map[*prog.Syscall][]uint64 // 新增字段
 }
 
 type triageCall struct {
@@ -137,13 +138,28 @@ func (job *triageJob) execute(req *queue.Request, flags ProgFlags) *queue.Result
 }
 
 func (job *triageJob) run(fuzzer *Fuzzer) {
+    // fuzzer.Logf(0, "============================================================")
 	fuzzer.statNewInputs.Add(1)
 	job.fuzzer = fuzzer
 	job.info.Logf("\n%s", job.p.Serialize())
+	// 初始化allCover
+    job.allCover = make(map[*prog.Syscall][]uint64)
+    // fuzzer.Logf(0, "\n%s", job.p.Serialize())
 	for call, info := range job.calls {
+        // 安全地获取syscall
+        var syscall *prog.Syscall
+        if call != -1 {
+            syscall = job.p.Calls[call].Meta
+            // 把signal转换为uint64切片 
+            signals := info.newSignal.ToRaw()
+            job.allCover[syscall] = signals
+        }
 		job.info.Logf("call #%d [%s]: |new signal|=%d%s",
 			call, job.p.CallName(call), info.newSignal.Len(), signalPreview(info.newSignal))
+    	// fuzzer.Logf(0, "call #%d [%s]: |new signal|=%d%s",
+			// call, job.p.CallName(call), info.newSignal.Len(), signalPreview(info.newSignal))
 	}
+    // fuzzer.Logf(0, "============================================================")
 
 	// Compute input coverage and non-flaky signal for minimization.
 	stop := job.deflake(job.execute)
@@ -154,14 +170,14 @@ func (job *triageJob) run(fuzzer *Fuzzer) {
 	for call, info := range job.calls {
 		wg.Add(1)
 		go func() {
-			job.handleCall(call, info)
+			job.handleCall(call, info, job.allCover) // 传入allCover
 			wg.Done()
 		}()
 	}
 	wg.Wait()
 }
 
-func (job *triageJob) handleCall(call int, info *triageCall) {
+func (job *triageJob) handleCall(call int, info *triageCall, allCover map[*prog.Syscall][]uint64) {
 	if info.newStableSignal.Empty() {
 		return
 	}
@@ -172,6 +188,14 @@ func (job *triageJob) handleCall(call int, info *triageCall) {
 		if p == nil {
 			return
 		}
+        // 更新allCover,只保留最小化后的系统调用信息
+        newAllCover := make(map[*prog.Syscall][]uint64)
+        for _, c := range p.Calls {
+            if covers, exists := allCover[c.Meta]; exists {
+                newAllCover[c.Meta] = covers
+            }
+        }
+        allCover = newAllCover
 	}
 	callName := p.CallName(call)
 	if !job.fuzzer.Config.NewInputFilter(callName) {
@@ -216,25 +240,7 @@ func (job *triageJob) handleCall(call int, info *triageCall) {
 		RawCover: info.rawCover,
 	}
 	job.fuzzer.Config.Corpus.Save(input)
-	go func(p *prog.Prog) {
-	    // build per-syscall raw cover map: use info.rawCover for calls we processed
-	    allCover := make(map[*prog.Syscall][]uint64)
-	    // iterate job.calls or use info.rawCover. For simplicity, gather from job.calls:
-	    for callIdx, tc := range job.calls {
-	        if tc == nil || len(tc.rawCover) == 0 {
-	            continue
-	        }
-	        sc := p.Calls[callIdx].Meta
-	        // convert uint64 slice (trie) if necessary
-	        addrs := make([]uint64, 0, len(tc.rawCover))
-	        for _, a := range tc.rawCover {
-	            addrs = append(addrs, uint64(a))
-	        }
-	        allCover[sc] = append(allCover[sc], addrs...)
-	    }
-	    f := job.fuzzer
-	    f.UpdateSyscallPairFromProg(p, allCover)
-	}(p)
+	go job.fuzzer.UpdateSyscallPairFromProg(p, allCover)
 }
 
 func (job *triageJob) deflake(exec func(*queue.Request, ProgFlags) *queue.Result) (stop bool) {

@@ -137,7 +137,7 @@ func (f *Fuzzer) InjectSeedsFromSyscallPairJSON(jsonPath string) error {
     var deps []struct {
         Targets []string `json:"Target"`
         Relate  []string `json:"Relate"`
-        Addr    uint32   `json:"Addr"`
+        Addr    uint64   `json:"Addr"`
     }
     if err := json.Unmarshal(data, &deps); err != nil {
         return fmt.Errorf("parse syscall pair json: %w", err)
@@ -147,7 +147,7 @@ func (f *Fuzzer) InjectSeedsFromSyscallPairJSON(jsonPath string) error {
     if ct == nil {
         return fmt.Errorf("choice table not ready")
     }
-    rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
+    // rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
     generated := make(map[string]bool)
     var seeds []*prog.Prog
     for _, dep := range deps {
@@ -175,7 +175,7 @@ func (f *Fuzzer) InjectSeedsFromSyscallPairJSON(jsonPath string) error {
                     Relate:   rel,
                     Verified: false,
                     Freq:     0,
-                    Addr:     0,
+                    Addr:     dep.Addr,
                 })
 
                 // 对每个系统调用对生成3个不同的种子程序
@@ -211,6 +211,18 @@ func (f *Fuzzer) InjectSeedsFromSyscallPairJSON(jsonPath string) error {
 }
 
 func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Syscall][]uint64) {
+    // 打印当前正在处理的程序
+    // f.Logf(0, "Updating pairs from program:\n%s", p.Serialize())
+
+    // 遍历 allCover，打印每个系统调用触发的覆盖路径
+    // for syscall, covers := range allCover {
+    //     var paths []string
+    //     for _, addr := range covers {
+    //         paths = append(paths, fmt.Sprintf("0x%x", addr))
+    //     }
+    //     f.Logf(0, "  -> Syscall[%s] triggered paths: %s", syscall.Name, strings.Join(paths, ", "))
+    // }
+	
     f.ctMu.Lock()
     defer f.ctMu.Unlock()
     ct := f.ct
