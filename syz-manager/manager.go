@@ -1308,12 +1308,12 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 		        log.Logf(0, "seed inject failed: %v", err)
 		    }
 		}
-		go mgr.periodicDepStats()
+		// go mgr.periodicDepStats()
 		fuzzerObj.AddCandidates(candidates)
-		go mgr.periodicCoverageDump()
-		directedCnt, _ := mgr.target.CountExplicitDeps(nil, enabledSyscalls)
-		enabledCount := len(enabledSyscalls)
-		log.Logf(0, "directed explicit deps: %d (max=%d)", directedCnt, enabledCount*(enabledCount-1))
+		// go mgr.periodicCoverageDump()
+		// directedCnt, _ := mgr.target.CountExplicitDeps(nil, enabledSyscalls)
+		// enabledCount := len(enabledSyscalls)
+		// log.Logf(0, "directed explicit deps: %d (max=%d)", directedCnt, enabledCount*(enabledCount-1))
 		mgr.fuzzer.Store(fuzzerObj)
 		mgr.http.Fuzzer.Store(fuzzerObj)
 
