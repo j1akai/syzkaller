@@ -13,79 +13,48 @@ func (target *Target) Generate(rs rand.Source, ncalls int, ct *ChoiceTable) *Pro
     }
     r := newRand(target, rs)
     s := newState(target, ct, nil)
-
-    // 先生成一半以上的调用
-    firstHalf := ncalls/2 + 1
-    for len(p.Calls) < firstHalf {
-        calls := r.generateCall(s, p, len(p.Calls))
-        for _, c := range calls {
-            s.analyze(c)
-            p.Calls = append(p.Calls, c)
-        }
-    }
-
-    // 40%概率使用隐式依赖信息
-    if r.rand(100) < 40 && ct != nil && ct.SyscallPair != nil {
-        searchStart := len(p.Calls) - 1 // 从末尾开始搜索
-        
-        // 尝试3次根据隐式依赖添加系统调用
-        for attempt := 0; attempt < 3 && len(p.Calls) < ncalls && searchStart >= 0; attempt++ {
-            // 从searchStart向前查找作为target的系统调用
-            foundTarget := false
-            for i := searchStart; i >= 0; i-- {
-                currCall := p.Calls[i].Meta
-                if pairs, exists := ct.SyscallPair[currCall]; exists && len(pairs) > 0 {
-                    // 在其relate中随机选择一个
-                    relate := pairs[r.rand(len(pairs))].Relate
-                    if relate == nil {
-                        continue
-                    }
-
-                    // 生成选中的relate调用
-                    newCalls := r.generateParticularCall(s, relate) 
-                    if len(newCalls) == 0 {
-                        continue
-                    }
-
-                    // 随机选择插入位置(target之前)
-                    insertPos := r.rand(i + 1)
-                    
-                    // 插入新调用
-                    p.Calls = append(p.Calls[:insertPos], append(newCalls, p.Calls[insertPos:]...)...)
-                    
-                    // 分析新加入的调用
-                    for _, c := range newCalls {
-                        s.analyze(c)
-                    }
-
-                    // 更新下一轮搜索的起始位置
-                    searchStart = i - 1
-                    foundTarget = true
-                    break
+    for len(p.Calls) < ncalls {
+        // 新增：在 1/3 ~ 2/3 区间内，优先插入pair(只有40%的机会进入这个特殊逻辑)
+        if ct != nil && len(p.Calls) > ncalls/3 && len(p.Calls) <= ncalls*2/3 && len(ct.SyscallPair) > 0 && r.Intn(10) < 4 {
+            // 随机选一个target
+            targets := make([]*Syscall, 0, len(ct.SyscallPair))
+            for t, relates := range ct.SyscallPair {
+                if len(relates) > 0 {
+                    targets = append(targets, t)
                 }
             }
-            
-            // 如果没找到target就退出循环
-            if !foundTarget {
-                break
+            if len(targets) > 0 {
+                targetIdx := r.Intn(len(targets))
+                targetCall := targets[targetIdx]
+                relates := ct.SyscallPair[targetCall]
+                relateIdx := r.Intn(len(relates))
+                relateCall := relates[relateIdx].Relate
+                // 先插 relate
+                calls := r.generateParticularCall(s, relateCall)
+                for _, c := range calls {
+                    s.analyze(c)
+                    p.Calls = append(p.Calls, c)
+                }
+                // 再插 target
+                calls = r.generateParticularCall(s, targetCall)
+                for _, c := range calls {
+                    s.analyze(c)
+                    p.Calls = append(p.Calls, c)
+                }
+                continue
             }
         }
-    }
-
-    // 继续生成剩余的调用直到达到ncalls
-    for len(p.Calls) < ncalls {
+        // 其他情况，走原逻辑
         calls := r.generateCall(s, p, len(p.Calls))
         for _, c := range calls {
             s.analyze(c)
             p.Calls = append(p.Calls, c)
         }
     }
-
-    // 处理可能超出ncalls的情况
+    // ...existing code...
     for len(p.Calls) > ncalls {
         p.RemoveCall(ncalls - 1)
     }
-
     p.sanitizeFix()
     p.debugValidate()
     return p
