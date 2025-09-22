@@ -321,7 +321,8 @@ type SyscallPairInfo struct {
     Relate   *Syscall
     Verified bool   // 是否被动态验证过
     Freq     int    // 出现次数
-	Addr	 uint64	// 记录地址(十进制)
+    Source   string // 源文件路径
+    Line     int    // 行号
 }
 
 // ChooseTable allows to do a weighted choice of a syscall for a given syscall

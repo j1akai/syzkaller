@@ -141,7 +141,8 @@ func (f *Fuzzer) InjectSeedsFromSyscallPairJSON(jsonPath string) error {
     var deps []struct {
         Targets []string `json:"Target"`
         Relate  []string `json:"Relate"`
-        Addr    uint64   `json:"Addr"`
+        Source  string   `json:"Source"`
+        Line    int      `json:"Line"`
     }
     if err := json.Unmarshal(data, &deps); err != nil {
         return fmt.Errorf("parse syscall pair json: %w", err)
@@ -155,6 +156,7 @@ func (f *Fuzzer) InjectSeedsFromSyscallPairJSON(jsonPath string) error {
     generated := make(map[string]bool)
     var seeds []*prog.Prog
     for _, dep := range deps {
+		relSource := normalizeSourcePath(dep.Source) // 转为相对路径
         for _, tname := range dep.Targets {
             tgt := f.target.SyscallMap[tname]
             if tgt == nil || !ct.Enabled(tgt.ID) {
@@ -171,20 +173,6 @@ func (f *Fuzzer) InjectSeedsFromSyscallPairJSON(jsonPath string) error {
                 }
                 generated[key] = true
 
-				hexStr := fmt.Sprintf("%x", dep.Addr)
-				paddingNeeded := 16 - len(hexStr)
-                var paddedHexStr string
-                if paddingNeeded > 0 {
-                    paddedHexStr = strings.Repeat("f", paddingNeeded) + hexStr
-                } else {
-                    paddedHexStr = hexStr
-                }
-				finalAddr, err := strconv.ParseUint(paddedHexStr, 16, 64)
-                if err != nil {
-                    f.Logf(0, "failed to parse transformed address for %v->%v: %v", tname, rname, err)
-                    continue
-                }
-
                 // 插入到ChoiceTable.SyscallPair
                 if ct.SyscallPair == nil {
                     ct.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo)
@@ -193,7 +181,8 @@ func (f *Fuzzer) InjectSeedsFromSyscallPairJSON(jsonPath string) error {
                     Relate:   rel,
                     Verified: false,
                     Freq:     0,
-                    Addr:     finalAddr,
+                    Source:   relSource,
+                    Line:     dep.Line,
                 })
 				// f.Logf(0, "Transforming address for pair %v->%v: origin=0x%x, now=0x%x", tname, rname, dep.Addr, finalAddr)
 
@@ -278,8 +267,8 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
     //     }
     // }
     
-    f.ctMu.Lock()
-    defer f.ctMu.Unlock()
+    f.SrcLineMu.RLock()
+    defer f.SrcLineMu.RUnlock()
     ct := f.ct
     if ct == nil || ct.SyscallPair == nil {
         // f.Logf(0, "-> Choice table or SyscallPair map is nil, skipping update.")
@@ -287,67 +276,8 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
         return
     }
     calls := p.Calls
-
-    // 1. 先做已有pair的验证
-    // f.Logf(0, "\n-> Phase 1: Verifying existing syscall pairs...")
-    for i := 0; i < len(calls); i++ {
-        sa := calls[i].Meta
-        targetCovers, hasTargetCover := allCover[sa]
-        if !hasTargetCover {
-            continue
-        }
-        for j := 0; j < len(calls); j++ {
-            if i == j {
-                continue
-            }
-            sb := calls[j].Meta
-            pairList := ct.SyscallPair[sa]
-            for _, pair := range pairList {
-                if pair.Relate == sb {
-                    // 日志 2: 发现一个需要验证的 pair。
-                    // f.Logf(0, "  -> Checking existing pair %s -> %s for address 0x%x", sa.Name, sb.Name, pair.Addr)
-                    addrFound := false
-                    // 检查 target syscall 的覆盖
-                    for _, addr := range targetCovers {
-                        // 这是您之前添加的日志，我保留了它用于详细调试
-                        // f.Logf(0, "    -> Comparing with target's cover: 0x%x", addr)
-                        if addr == pair.Addr {
-                            addrFound = true
-                            break
-                        }
-                    }
-                    // 如果在 target 中没找到，则检查 relate syscall 的覆盖
-                    if !addrFound {
-                        if relateCovers, ok := allCover[sb]; ok {
-                            // f.Logf(0, "    -> Not found in target's cover, checking relate's cover...")
-                            for _, addr := range relateCovers {
-                                // f.Logf(0, "    -> Comparing with relate's cover: 0x%x", addr)
-                                if addr == pair.Addr {
-                                    addrFound = true
-                                    break
-                                }
-                            }
-                        }
-                    }
-
-                    // 日志 3: 打印验证结果
-                    if addrFound {
-                        pair.Verified = true
-                        pair.Freq++ 
-                        f.Logf(0, "  -> [SUCCESS] Verified pair: %s -> %s (Address 0x%x found). New Freq: %d", sa.Name, sb.Name, pair.Addr, pair.Freq)
-                    } else {
-                        // f.Logf(0, "  -> [INFO] Pair %s -> %s (Address 0x%x) was not covered in this execution.", sa.Name, sb.Name, pair.Addr)
-                    }
-                }
-            }
-        }
-    }
-
-    // 2. 自动发现新pair
-    // f.Logf(0, "\n-> Phase 2: Discovering new pairs from shared CONFIGs...")
-    f.SrcLineMu.RLock()
-    defer f.SrcLineMu.RUnlock()
     vmlinux := f.Vmlinux
+
     addrToConfigs := func(addr uint64) (string, int, []string) {
         hexAddr := fmt.Sprintf("0x%x", addr)
         out, err := exec.Command("addr2line", "-e", vmlinux, hexAddr).Output()
@@ -377,25 +307,82 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
         }
         return rel, lineno, configs
     }
-    
-    // 收集每个call的addr->config映射
-    callConfigSet := make(map[*prog.Syscall]map[string][]uint64)
-    for _, call := range calls {
-        sa := call.Meta
-        addrs, ok := allCover[sa]
-        if !ok {
+
+    // 1. 先做已有pair的验证
+    // f.Logf(0, "\n-> Phase 1: Verifying existing syscall pairs...")
+    for i := 0; i < len(calls); i++ {
+        sa := calls[i].Meta
+        targetCovers, hasTargetCover := allCover[sa]
+        if !hasTargetCover {
             continue
         }
-        for _, addr := range addrs {
-            _, _, configs := addrToConfigs(addr)
-            for _, cfg := range configs {
-                if callConfigSet[sa] == nil {
-                    callConfigSet[sa] = make(map[string][]uint64)
+        for j := 0; j < len(calls); j++ {
+            if i == j {
+                continue
+            }
+            sb := calls[j].Meta
+            pairList := ct.SyscallPair[sa]
+            for _, pair := range pairList {
+                if pair.Relate == sb {
+                    // 日志 2: 发现一个需要验证的 pair。
+                    // f.Logf(0, "  -> Checking existing pair %s -> %s for address 0x%x", sa.Name, sb.Name, pair.Addr)
+                    found := false
+                	// 检查 target syscall 的覆盖
+                	for _, addr := range targetCovers {
+                	    src, line, _ := addrToConfigs(addr)
+                	    if src == pair.Source && line == pair.Line {
+                	        found = true
+                	        break
+                	    }
+                	}
+                	// 如果在 target 中没找到，则检查 relate syscall 的覆盖
+                	if !found {
+                	    if relateCovers, ok := allCover[sb]; ok {
+                	        for _, addr := range relateCovers {
+                	            src, line, _ := addrToConfigs(addr)
+                	            if src == pair.Source && line == pair.Line {
+                	                found = true
+                	                break
+                	            }
+                	        }
+                	    }
+                	}
+
+                    // 日志 3: 打印验证结果
+                	if found {
+                	    pair.Verified = true
+                	    pair.Freq++
+                	    f.Logf(0, "  -> [SUCCESS] Verified pair: %s -> %s (%s:%d found). New Freq: %d", sa.Name, sb.Name, pair.Source, pair.Line, pair.Freq)
+                	}
                 }
-                callConfigSet[sa][cfg] = append(callConfigSet[sa][cfg], addr)
             }
         }
     }
+
+    // 2. 自动发现新pair
+    // f.Logf(0, "\n-> Phase 2: Discovering new pairs from shared CONFIGs...")
+    
+    // 收集每个call的source:line->config映射
+	callConfigSet := make(map[*prog.Syscall]map[string][]struct{Source string; Line int})
+	for _, call := range calls {
+	    sa := call.Meta
+	    addrs, ok := allCover[sa]
+	    if !ok {
+	        continue
+	    }
+	    for _, addr := range addrs {
+	        src, line, configs := addrToConfigs(addr)
+	        if src == "" || line == 0 {
+	            continue
+	        }
+	        for _, cfg := range configs {
+	            if callConfigSet[sa] == nil {
+	                callConfigSet[sa] = make(map[string][]struct{Source string; Line int})
+	            }
+	            callConfigSet[sa][cfg] = append(callConfigSet[sa][cfg], struct{Source string; Line int}{src, line})
+	        }
+	    }
+	}
 
     // 任意两个call，若有config交集且不在SyscallPair里，则插入
     for i := 0; i < len(calls); i++ {
@@ -422,35 +409,34 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
             if configsA == nil || configsB == nil {
                 continue
             }
-            for cfg, addrsA := range configsA {
-                if addrsB, ok := configsB[cfg]; ok {
-                    // 日志 5: 发现了一个基于共享CONFIG的新关系
-                    f.Logf(0, "  -> [NEW DISCOVERY] Found shared CONFIG '%s' between %s and %s", cfg, sa.Name, sb.Name)
-                    if ct.SyscallPair == nil {
-                        ct.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo)
-                    }
-                    // 为 sa -> sb 添加所有相关地址
-                    for _, addr := range addrsA {
-                        ct.SyscallPair[sa] = append(ct.SyscallPair[sa], &prog.SyscallPairInfo{
-                            Relate:   sb,
-                            Verified: false, // 新发现的pair初始为未验证
-                            Freq:     0,
-                            Addr:     addr,
-                        })
-                        // f.Logf(0, "    -> Auto-added pair: %s -> %s (CONFIG: %s, Addr: 0x%x)", sa.Name, sb.Name, cfg, addr)
-                    }
-                     // 为 sb -> sa 添加所有相关地址
-                    for _, addr := range addrsB {
-                        ct.SyscallPair[sb] = append(ct.SyscallPair[sb], &prog.SyscallPairInfo{
-                            Relate:   sa,
-                            Verified: false,
-                            Freq:     0,
-                            Addr:     addr,
-                        })
-                        // f.Logf(0, "    -> Auto-added pair: %s -> %s (CONFIG: %s, Addr: 0x%x)", sb.Name, sa.Name, cfg, addr)
-                    }
-                }
-            }
+        	for cfg, srcLinesA := range configsA {
+        	    if srcLinesB, ok := configsB[cfg]; ok {
+        	        f.Logf(0, "  -> [NEW DISCOVERY] Found shared CONFIG '%s' between %s and %s", cfg, sa.Name, sb.Name)
+        	        if ct.SyscallPair == nil {
+        	            ct.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo)
+        	        }
+        	        // 为 sa -> sb 添加所有相关 source:line
+        	        for _, sl := range srcLinesA {
+        	            ct.SyscallPair[sa] = append(ct.SyscallPair[sa], &prog.SyscallPairInfo{
+        	                Relate:   sb,
+        	                Verified: false,
+        	                Freq:     0,
+        	                Source:   sl.Source,
+        	                Line:     sl.Line,
+        	            })
+        	        }
+        	        // 为 sb -> sa 添加所有相关 source:line
+        	        for _, sl := range srcLinesB {
+        	            ct.SyscallPair[sb] = append(ct.SyscallPair[sb], &prog.SyscallPairInfo{
+        	                Relate:   sa,
+        	                Verified: false,
+        	                Freq:     0,
+        	                Source:   sl.Source,
+        	                Line:     sl.Line,
+        	            })
+        	        }
+        	    }
+        	}
         }
     }
     // f.Logf(0, "------------[ UpdateSyscallPairFromProg End ]--------------")
