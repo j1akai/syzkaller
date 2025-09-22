@@ -177,6 +177,8 @@ func (job *triageJob) run(fuzzer *Fuzzer) {
 	wg.Wait()
 }
 
+var updatePairSem = make(chan struct{}, 3) // 最多3个并发任务
+
 func (job *triageJob) handleCall(call int, info *triageCall, allCover map[*prog.Syscall][]uint64) {
 	if info.newStableSignal.Empty() {
 		return
@@ -240,7 +242,11 @@ func (job *triageJob) handleCall(call int, info *triageCall, allCover map[*prog.
 		RawCover: info.rawCover,
 	}
 	job.fuzzer.Config.Corpus.Save(input)
-	go job.fuzzer.UpdateSyscallPairFromProg(p, allCover)
+    go func() {
+        updatePairSem <- struct{}{}
+        defer func() { <-updatePairSem }()
+        job.fuzzer.UpdateSyscallPairFromProg(p, allCover)
+    }()
 }
 
 func (job *triageJob) deflake(exec func(*queue.Request, ProgFlags) *queue.Result) (stop bool) {
