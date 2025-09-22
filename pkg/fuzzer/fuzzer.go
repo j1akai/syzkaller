@@ -277,9 +277,8 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
     //         f.Logf(0, "  -> Syscall[%s] triggered %d addresses: %s", syscall.Name, len(covers), strings.Join(paths, ", "))
     //     }
     // }
-    
-    f.ctMu.Lock()
-    defer f.ctMu.Unlock()
+    f.SrcLineMu.RLock()
+    defer f.SrcLineMu.RUnlock()
     ct := f.ct
     if ct == nil || ct.SyscallPair == nil {
         // f.Logf(0, "-> Choice table or SyscallPair map is nil, skipping update.")
@@ -345,8 +344,6 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
 
     // 2. 自动发现新pair
     // f.Logf(0, "\n-> Phase 2: Discovering new pairs from shared CONFIGs...")
-    f.SrcLineMu.RLock()
-    defer f.SrcLineMu.RUnlock()
     vmlinux := f.Vmlinux
     addrToConfigs := func(addr uint64) (string, int, []string) {
         hexAddr := fmt.Sprintf("0x%x", addr)
