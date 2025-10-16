@@ -15,7 +15,7 @@ func (target *Target) Generate(rs rand.Source, ncalls int, ct *ChoiceTable) *Pro
     s := newState(target, ct, nil)
     for len(p.Calls) < ncalls {
         // 新增：在 1/3 ~ 2/3 区间内，优先插入pair(只有40%的机会进入这个特殊逻辑)
-        if ct != nil && len(p.Calls) > ncalls/3 && len(p.Calls) <= ncalls*2/3 && len(ct.SyscallPair) > 0 && r.Intn(10) < 4 {
+        if ct != nil && len(p.Calls) > ncalls/3 && len(p.Calls) <= ncalls*2/3 && len(ct.SyscallPair) > 0 && r.Intn(10) < 6 {
             // 随机选一个target
             targets := make([]*Syscall, 0, len(ct.SyscallPair))
             for t, relates := range ct.SyscallPair {
@@ -51,7 +51,6 @@ func (target *Target) Generate(rs rand.Source, ncalls int, ct *ChoiceTable) *Pro
             p.Calls = append(p.Calls, c)
         }
     }
-    // ...existing code...
     for len(p.Calls) > ncalls {
         p.RemoveCall(ncalls - 1)
     }

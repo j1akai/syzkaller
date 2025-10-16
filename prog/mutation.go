@@ -130,57 +130,20 @@ func (ctx *mutator) insertCallWithDependency() bool {
     }
 	
 	// 在老种子里随机选一个位置idx
-    idx := r.biasedRand(len(p.Calls)+1, 5)
+    idx := r.Intn(len(p.Calls) + 1)
     var c *Call
     if idx < len(p.Calls) {
         c = p.Calls[idx]
     }
     s := analyze(ctx.ct, ctx.corpus, p, c)
 
-    var mostVerified *struct {
-        target *Syscall
-        relate *Syscall
-        freq   int
-        insertIdx int
-    }
+    // 生成候选集并做加权选择
+    // 候选集键为 *Syscall，值为权重（int）
+    candidates := make(map[*Syscall]int)
 
-	// 从idx开始往前遍历每一个syscall
-    for i := idx - 1; i >= 0; i-- {
-        call := p.Calls[i]
-		// 判断该syscall是不是target_syscall,如果不是,则继续往前遍历
-        infos, ok := ctx.ct.SyscallPair[call.Meta]
-        if !ok || len(infos) == 0 {
-            continue
-        }
-		rand.Shuffle(len(infos), func(i, j int) {
-		    infos[i], infos[j] = infos[j], infos[i]
-		})
-		// 遍历依赖于该syscall的relate_syscall
-        for _, info := range infos {
-			// 看当前target和relate是已被验证,如果未被验证,则把relate插入到idx前面
-            if !info.Verified {
-                calls := r.generateParticularCall(s, info.Relate)
-                p.insertBefore(c, calls)
-                for len(p.Calls) > ctx.ncalls {
-                    p.RemoveCall(idx)
-                }
-                return true
-            }
-			// 记录系统调用对出现在种子库中次数最多的那一对
-            if mostVerified == nil || info.Freq > mostVerified.freq {
-                mostVerified = &struct {
-                    target *Syscall
-                    relate *Syscall
-                    freq   int
-                    insertIdx int
-                }{call.Meta, info.Relate, info.Freq, idx}
-            }
-        }
-    }
-
-	// 如果前面找到的<target,relate>都已经被验证,那么选取被验证次数最多的那一对
-    if mostVerified != nil {
-        calls := r.generateParticularCall(s, mostVerified.relate)
+    // 如果没有SyscallPair信息，直接回退到随机插入
+    if ctx.ct == nil || ctx.ct.SyscallPair == nil || len(ctx.ct.SyscallPair) == 0 {
+        calls := r.generateCall(s, p, idx)
         p.insertBefore(c, calls)
         for len(p.Calls) > ctx.ncalls {
             p.RemoveCall(idx)
@@ -188,8 +151,66 @@ func (ctx *mutator) insertCallWithDependency() bool {
         return true
     }
 
-	// 如果老种子中不存在target_syscall,那么就随机挑选系统调用进行插入,此时不再利用依赖关系
-    calls := r.generateCall(s, p, idx)
+    // 第一阶段：遍历 [0, idx-1]，如果某个 call 在任意 target 的 infos 中作为 Relate 出现，
+    // 那么把对应的 target 放入候选集，权重按 1 + freq 累加（同一个 target 多次出现则累加）
+    if idx > 0 {
+        for i := 0; i < idx; i++ {
+            call := p.Calls[i]
+            // 对于每个已记录的 target，检查其 infos 中是否有 relate 等于当前 call
+            for target, infos := range ctx.ct.SyscallPair {
+                for _, info := range infos {
+                    if info.Relate != nil && info.Relate.ID == call.Meta.ID {
+                        if candidates[target] == 0 {
+                			candidates[target] = 1
+            			}
+                        candidates[target] += info.Freq
+                    }
+                }
+            }
+        }
+    }
+
+    // 第二阶段：遍历 [idx, end]，如果某个 call 是作为 target 出现，则把其所有 relate 加入候选集，
+    // 权重按 1 + freq 累加（同一个 relate 出现多次则累加）
+    for i := idx; i < len(p.Calls); i++ {
+        call := p.Calls[i]
+        if infos, ok := ctx.ct.SyscallPair[call.Meta]; ok {
+            for _, info := range infos {
+				if candidates[info.Relate] == 0 {
+					candidates[info.Relate] = 1
+				}
+                candidates[info.Relate] += info.Freq
+            }
+        }
+    }
+
+    // 如果候选集为空，退回到随机插入（不使用依赖）
+    if len(candidates) == 0 {
+        calls := r.generateCall(s, p, idx)
+        p.insertBefore(c, calls)
+        for len(p.Calls) > ctx.ncalls {
+            p.RemoveCall(idx)
+        }
+        return true
+    }
+
+    // 加权随机选择一个 syscall 插入
+    total := 0
+    for _, w := range candidates {
+        total += w
+    }
+    choice := r.Intn(total)
+    acc := 0
+    var chosen *Syscall
+    for sc, w := range candidates {
+        acc += w
+        if choice < acc {
+            chosen = sc
+            break
+        }
+    }
+    // 生成并插入所选 syscall 的调用
+    calls := r.generateParticularCall(s, chosen)
     p.insertBefore(c, calls)
     for len(p.Calls) > ctx.ncalls {
         p.RemoveCall(idx)
