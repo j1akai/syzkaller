@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"slices"
 	"sort"
+	"sync"
 	"github.com/google/syzkaller/pkg/log"
 )
 
@@ -332,6 +333,7 @@ type ChoiceTable struct {
 	runs   [][]int32
 	calls  []*Syscall
 	SyscallPair map[*Syscall][]*SyscallPairInfo
+	Mu      sync.RWMutex
 }
 // IsExplicitDep 判断 x->y 是否为显式依赖
 func (ct *ChoiceTable) IsExplicitDep(x, y int) bool {
@@ -405,7 +407,7 @@ func (target *Target) BuildChoiceTable(corpus []*Prog, enabled map[*Syscall]bool
 			run[i][j] = sum
 		}
 	}
-	return &ChoiceTable{target, run, generatableCalls, make(map[*Syscall][]*SyscallPairInfo)}
+	return &ChoiceTable{target, run, generatableCalls, make(map[*Syscall][]*SyscallPairInfo), sync.RWMutex{}}
 }
 
 func (ct *ChoiceTable) Generatable(call int) bool {

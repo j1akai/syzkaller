@@ -241,6 +241,13 @@ func normalizeSourcePath(absPath string) string {
     return cleanedPath
 }
 
+func abs(x int) int {
+    if x < 0 {
+        return -x
+    }
+    return x
+}
+
 func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Syscall][]uint64) {
     // if len(p.Calls) != 7 {
     //     return
@@ -330,7 +337,7 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
                 	// 检查 target syscall 的覆盖
                 	for _, addr := range targetCovers {
                 	    src, line, _ := addrToConfigs(addr)
-                	    if src == pair.Source && line == pair.Line {
+                	    if src == pair.Source && abs(line-pair.Line) <= 20 {
                 	        found = true
                 	        break
                 	    }
@@ -340,7 +347,7 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
                 	    if relateCovers, ok := allCover[sb]; ok {
                 	        for _, addr := range relateCovers {
                 	            src, line, _ := addrToConfigs(addr)
-                	            if src == pair.Source && line == pair.Line {
+                	            if src == pair.Source && abs(line-pair.Line) <= 20 {
                 	                found = true
                 	                break
                 	            }
@@ -350,8 +357,10 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
 
                     // 日志 3: 打印验证结果
                 	if found {
+						f.ct.Mu.Lock()
                 	    pair.Verified = true
                 	    pair.Freq++
+						f.ct.Mu.Unlock()
                 	    f.Logf(0, "  -> [SUCCESS] Verified pair: %s -> %s (%s:%d found). New Freq: %d", sa.Name, sb.Name, pair.Source, pair.Line, pair.Freq)
                 	}
                 }
@@ -415,6 +424,7 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
         	        if ct.SyscallPair == nil {
         	            ct.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo)
         	        }
+					f.ct.Mu.Lock()
         	        // 为 sa -> sb 添加所有相关 source:line
         	        for _, sl := range srcLinesA {
         	            ct.SyscallPair[sa] = append(ct.SyscallPair[sa], &prog.SyscallPairInfo{
@@ -435,6 +445,7 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
         	                Line:     sl.Line,
         	            })
         	        }
+					f.ct.Mu.Unlock()
         	    }
         	}
         }

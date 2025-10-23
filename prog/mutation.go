@@ -123,6 +123,8 @@ type mutator struct {
 }
 
 func (ctx *mutator) insertCallWithDependency() bool {
+    ctx.ct.Mu.RLock()
+    defer ctx.ct.Mu.RUnlock()
 	// 老种子长度不能超过预定义的最大种子长度,否则不变异
 	p, r := ctx.p, ctx.r
     if len(p.Calls) >= ctx.ncalls {
