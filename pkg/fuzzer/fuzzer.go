@@ -308,6 +308,15 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
         return rel, lineno, configs
     }
 
+	// 新增：收集corpus已覆盖的所有addr
+	var corpusAddrs map[uint64]struct{}
+	if f.Config != nil && f.Config.Corpus != nil {
+		corpusAddrs = make(map[uint64]struct{})
+		for _, addr := range f.Config.Corpus.PCs() {
+			corpusAddrs[addr] = struct{}{}
+		}
+	}
+
     // 1. 先做已有pair的验证
     // f.Logf(0, "\n-> Phase 1: Verifying existing syscall pairs...")
     for i := 0; i < len(calls); i++ {
@@ -328,32 +337,94 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
                     // f.Logf(0, "  -> Checking existing pair %s -> %s for address 0x%x", sa.Name, sb.Name, pair.Addr)
                     found := false
                 	// 检查 target syscall 的覆盖
-                	for _, addr := range targetCovers {
-                	    src, line, _ := addrToConfigs(addr)
-                	    if src == pair.Source && line == pair.Line {
-                	        found = true
-                	        break
-                	    }
-                	}
-                	// 如果在 target 中没找到，则检查 relate syscall 的覆盖
-                	if !found {
-                	    if relateCovers, ok := allCover[sb]; ok {
-                	        for _, addr := range relateCovers {
-                	            src, line, _ := addrToConfigs(addr)
-                	            if src == pair.Source && line == pair.Line {
-                	                found = true
-                	                break
-                	            }
-                	        }
-                	    }
-                	}
-
-                    // 日志 3: 打印验证结果
-                	if found {
-                	    pair.Verified = true
-                	    pair.Freq++
-                	    f.Logf(0, "  -> [SUCCESS] Verified pair: %s -> %s (%s:%d found). New Freq: %d", sa.Name, sb.Name, pair.Source, pair.Line, pair.Freq)
-                	}
+					for _, addr := range targetCovers {
+						src, line, _ := addrToConfigs(addr)
+						if src == pair.Source && line == pair.Line {
+                	    	pair.Verified = true
+                	    	pair.Freq++
+                	    	f.Logf(0, "  -> [SUCCESS] Verified pair: %s -> %s (%s:%d found). New Freq: %d", sa.Name, sb.Name, pair.Source, pair.Line, pair.Freq)
+							break
+						} else {
+							// 新逻辑：src/line不匹配时，判断是否为corpus新覆盖且未被SyscallPair记录
+							if f.Config != nil && f.Config.Corpus != nil {
+								isNew := true
+								for _, caddr := range f.Config.Corpus.PCs() {
+									if caddr == addr {
+										isNew = false
+										break
+									}
+								}
+								if isNew {
+									already := false
+									for _, p := range ct.SyscallPair[sa] {
+										if p.Relate == sb && p.Source == src && p.Line == line {
+											already = true
+											break
+										}
+									}
+									if !already && src != "" && line != 0 {
+										if ct.SyscallPair == nil {
+											ct.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo)
+										}
+										ct.SyscallPair[sa] = append(ct.SyscallPair[sa], &prog.SyscallPairInfo{
+											Relate:   sb,
+											Verified: true,
+											Freq:     1,
+											Source:   src,
+											Line:     line,
+										})
+										f.Logf(0, "  -> [NEW SOURCELINE] Added by new addr: %s -> %s (%s:%d)", sa.Name, sb.Name, src, line)
+									}
+								}
+							}
+						}
+					}
+					// 如果在 target 中没找到，则检查 relate syscall 的覆盖
+					if !found {
+						if relateCovers, ok := allCover[sb]; ok {
+							for _, addr := range relateCovers {
+								src, line, _ := addrToConfigs(addr)
+								if src == pair.Source && line == pair.Line {
+                	    			pair.Verified = true
+                	    			pair.Freq++
+                	    			f.Logf(0, "  -> [SUCCESS] Verified pair: %s -> %s (%s:%d found). New Freq: %d", sa.Name, sb.Name, pair.Source, pair.Line, pair.Freq)
+									break
+								} else {
+									if f.Config != nil && f.Config.Corpus != nil {
+										isNew := true
+										for _, caddr := range f.Config.Corpus.PCs() {
+											if caddr == addr {
+												isNew = false
+												break
+											}
+										}
+										if isNew {
+											already := false
+											for _, p := range ct.SyscallPair[sa] {
+												if p.Relate == sb && p.Source == src && p.Line == line {
+													already = true
+													break
+												}
+											}
+											if !already && src != "" && line != 0 {
+												if ct.SyscallPair == nil {
+													ct.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo)
+												}
+												ct.SyscallPair[sa] = append(ct.SyscallPair[sa], &prog.SyscallPairInfo{
+													Relate:   sb,
+													Verified: true,
+													Freq:     1,
+													Source:   src,
+													Line:     line,
+												})
+												f.Logf(0, "  -> [NEW SOURCELINE] Added by new addr: %s -> %s (%s:%d)", sa.Name, sb.Name, src, line)
+											}
+										}
+									}
+								}
+							}
+						}
+					}
                 }
             }
         }
