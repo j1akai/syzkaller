@@ -166,6 +166,9 @@ func (job *triageJob) run(fuzzer *Fuzzer) {
 	if stop {
 		return
 	}
+
+
+
 	var wg sync.WaitGroup
 	for call, info := range job.calls {
 		wg.Add(1)
@@ -185,19 +188,20 @@ func (job *triageJob) handleCall(call int, info *triageCall, allCover map[*prog.
 	}
 
 	p := job.p
+	dev_p := job.p
 	if job.flags&ProgMinimized == 0 {
 		p, call = job.minimize(call, info)
 		if p == nil {
 			return
 		}
         // 更新allCover,只保留最小化后的系统调用信息
-        newAllCover := make(map[*prog.Syscall][]uint64)
-        for _, c := range p.Calls {
-            if covers, exists := allCover[c.Meta]; exists {
-                newAllCover[c.Meta] = covers
-            }
-        }
-        allCover = newAllCover
+        // newAllCover := make(map[*prog.Syscall][]uint64)
+        // for _, c := range p.Calls {
+        //     if covers, exists := allCover[c.Meta]; exists {
+        //         newAllCover[c.Meta] = covers
+        //     }
+        // }
+        // allCover = newAllCover
 	}
 	callName := p.CallName(call)
 	if !job.fuzzer.Config.NewInputFilter(callName) {
@@ -245,7 +249,7 @@ func (job *triageJob) handleCall(call int, info *triageCall, allCover map[*prog.
     go func() {
         updatePairSem <- struct{}{}
         defer func() { <-updatePairSem }()
-        job.fuzzer.UpdateSyscallPairFromProg(p, allCover)
+        job.fuzzer.UpdateSyscallPairFromProg(dev_p, allCover)
     }()
 }
 
