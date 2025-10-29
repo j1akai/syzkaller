@@ -47,7 +47,6 @@ type Fuzzer struct {
 	ctRegenerate chan struct{}
 
 	SourceLineToConfig SourceLineToConfig
-	SrcLineMu          sync.RWMutex
 	Vmlinux string
 
 	execQueues
@@ -266,15 +265,14 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
     //         f.Logf(0, "  -> Syscall[%s] triggered %d addresses: %s", syscall.Name, len(covers), strings.Join(paths, ", "))
     //     }
     // }
-    
-    f.SrcLineMu.RLock()
-    defer f.SrcLineMu.RUnlock()
     ct := f.ct
+	f.ct.Mu.RLock()
     if ct == nil || ct.SyscallPair == nil {
         // f.Logf(0, "-> Choice table or SyscallPair map is nil, skipping update.")
         // f.Logf(0, "------------[ UpdateSyscallPairFromProg End ]------------")
         return
     }
+	f.ct.Mu.RUnlock()
     calls := p.Calls
     vmlinux := f.Vmlinux
 
@@ -317,6 +315,7 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
 		}
 	}
 
+	f.ct.Mu.Lock()
     // 1. 先做已有pair的验证
     // f.Logf(0, "\n-> Phase 1: Verifying existing syscall pairs...")
     for i := 0; i < len(calls); i++ {
@@ -429,6 +428,7 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
             }
         }
     }
+	f.ct.Mu.Unlock()
 
     // 2. 自动发现新pair
     // f.Logf(0, "\n-> Phase 2: Discovering new pairs from shared CONFIGs...")
@@ -455,6 +455,7 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
 	    }
 	}
 
+	f.ct.Mu.Lock()
     // 任意两个call，若有config交集且不在SyscallPair里，则插入
     for i := 0; i < len(calls); i++ {
         sa := calls[i].Meta
@@ -510,6 +511,7 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
         	}
         }
     }
+	f.ct.Mu.Unlock()
     // f.Logf(0, "------------[ UpdateSyscallPairFromProg End ]--------------")
 }
 
