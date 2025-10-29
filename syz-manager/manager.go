@@ -1298,10 +1298,8 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 		// load config tree and sourceLine map
 		configTree, _ := fuzzer.LoadConfigTree(mgr.cfg.ConfigTreeJSON)
 		srcLineMap, _ := fuzzer.LoadSourceLineToConfig(mgr.cfg.SourceLine2ConfigJSON, configTree)
-		fuzzerObj.SrcLineMu.Lock()
 		fuzzerObj.SourceLineToConfig = srcLineMap
 		fuzzerObj.Vmlinux = mgr.cfg.VmlinuxPath // or filepath.Join(mgr.cfg.KernelObj, mgr.sysTarget.KernelObject)
-		fuzzerObj.SrcLineMu.Unlock()
 		// inject seeds
 		if mgr.cfg.SyscallPairJSON != "" {
 		    if err := fuzzerObj.InjectSeedsFromSyscallPairJSON(mgr.cfg.SyscallPairJSON); err != nil {

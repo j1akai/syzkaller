@@ -346,6 +346,8 @@ func (ct *ChoiceTable) IsImplicitDep(x, y int) bool {
         log.Logf(0, "IsImplicitDep: ct或SyscallPair为空")
         return false
     }
+	ct.Mu.RLock()
+	defer ct.Mu.RUnlock()
     xsc := ct.target.Syscalls[x]
     ysc := ct.target.Syscalls[y]
     // log.Logf(0, "IsImplicitDep: 检查 %v(%d) -> %v(%d)", xsc.Name, x, ysc.Name, y)

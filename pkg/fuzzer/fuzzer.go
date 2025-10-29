@@ -265,13 +265,16 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
     //         f.Logf(0, "  -> Syscall[%s] triggered %d addresses: %s", syscall.Name, len(covers), strings.Join(paths, ", "))
     //     }
     // }
-    ct := f.ct
+	ct := f.ct
 	f.ct.Mu.RLock()
-    if ct == nil || ct.SyscallPair == nil {
-        // f.Logf(0, "-> Choice table or SyscallPair map is nil, skipping update.")
-        // f.Logf(0, "------------[ UpdateSyscallPairFromProg End ]------------")
-        return
-    }
+	if ct == nil || ct.SyscallPair == nil {
+		// 如果在检查时发现 ct 或 SyscallPair 为 nil，必须先释放读锁再返回，
+		// 否则会导致后续尝试获取写锁的协程死锁。
+		f.ct.Mu.RUnlock()
+		// f.Logf(0, "-> Choice table or SyscallPair map is nil, skipping update.")
+		// f.Logf(0, "------------[ UpdateSyscallPairFromProg End ]------------")
+		return
+	}
 	f.ct.Mu.RUnlock()
     calls := p.Calls
     vmlinux := f.Vmlinux
@@ -852,9 +855,24 @@ func (fuzzer *Fuzzer) updateChoiceTable(programs []*prog.Prog) {
 	fuzzer.ctMu.Lock()
 	defer fuzzer.ctMu.Unlock()
 	if len(programs) >= fuzzer.ctProgs {
-        if fuzzer.ct != nil && fuzzer.ct.SyscallPair != nil {
-            newCt.SyscallPair = fuzzer.ct.SyscallPair
-        }
+		if fuzzer.ct != nil && fuzzer.ct.SyscallPair != nil {
+			// 深拷贝 SyscallPair map 和切片，避免与正在被更新的旧表共享底层数据结构，
+			// 并在读取时使用 ct.Mu 的读锁以防止并发写入。
+			f := fuzzer.ct
+			f.Mu.RLock()
+			newMap := make(map[*prog.Syscall][]*prog.SyscallPairInfo, len(f.SyscallPair))
+			for k, v := range f.SyscallPair {
+				if v == nil {
+					newMap[k] = nil
+					continue
+				}
+				copied := make([]*prog.SyscallPairInfo, len(v))
+				copy(copied, v)
+				newMap[k] = copied
+			}
+			f.Mu.RUnlock()
+			newCt.SyscallPair = newMap
+		}
 		fuzzer.ctProgs = len(programs)
 		fuzzer.ct = newCt
 	}
