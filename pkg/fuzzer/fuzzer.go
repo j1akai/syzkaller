@@ -386,14 +386,16 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
         src := line[:idx]
         lineno, _ := strconv.Atoi(strings.TrimSpace(line[idx+1:]))
         rel := normalizeSourcePath(src)
-        var configs []string
-        if ranges, ok := f.SourceLineToConfig[rel]; ok {
-            for _, r := range ranges {
-                if lineno >= r.StartLine && lineno <= r.EndLine {
-                    configs = append(configs, r.Configs...)
-                }
-            }
-        }
+		var configs []string
+		if ranges, ok := f.SourceLineToConfig[rel]; ok {
+			for _, r := range ranges {
+				// If StartLine and EndLine are both 0, treat the range as
+				// applying to the whole file (match any lineno).
+				if (r.StartLine == 0 && r.EndLine == 0) || (lineno >= r.StartLine && lineno <= r.EndLine) {
+					configs = append(configs, r.Configs...)
+				}
+			}
+		}
         // 日志 4: 打印 addr2line 的结果
         if len(configs) > 0 {
             // f.Logf(0, "  -> Addr 0x%x -> %s:%d -> CONFIGs: [%s]", addr, rel, lineno, strings.Join(configs, ", "))
