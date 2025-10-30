@@ -240,7 +240,99 @@ func normalizeSourcePath(absPath string) string {
     return cleanedPath
 }
 
+// TempSyscallPairUpdate 用于存储需要更新的系统调用对信息
+type TempSyscallPairUpdate struct {
+    Target   *prog.Syscall
+    Relate   *prog.Syscall
+    Source   string
+    Line     int
+    Verified bool
+    Freq     int
+}
+
+var (
+    tempPairUpdates []TempSyscallPairUpdate
+    tempPairMu      sync.RWMutex
+    updaterStarted  sync.Once
+)
+
+// startPairUpdater 启动一个后台线程定期检查和更新临时存储的系统调用对
+func (f *Fuzzer) startPairUpdater() {
+    updaterStarted.Do(func() {
+        go func() {
+            for {
+                time.Sleep(10 * time.Minute)
+                
+                tempPairMu.Lock()
+                if len(tempPairUpdates) >= 50 {
+                    f.Logf(0, "------------[ Batch Update SyscallPair Start ]------------")
+                    f.Logf(0, "Found %d updates to process", len(tempPairUpdates))
+                    
+                    // 获取当前所有更新
+                    updates := tempPairUpdates
+                    tempPairUpdates = nil // 清空临时存储
+                    
+                    // 统计信息
+                    verifiedCount := 0
+                    newPairCount := 0
+                    
+                    // 批量更新到 SyscallPair
+                    for _, update := range updates {
+                        found := false
+                        pairs := f.ct.SyscallPair[update.Target]
+                        for _, pair := range pairs {
+                            if pair.Relate == update.Relate &&
+                               pair.Source == update.Source &&
+                               pair.Line == update.Line {
+                                // 更新已存在的记录
+                                f.ct.Mu.Lock()
+                                pair.Verified = update.Verified
+                                pair.Freq += update.Freq
+                                f.ct.Mu.Unlock()
+                                found = true
+                                verifiedCount++
+                                f.Logf(0, "  -> [VERIFIED] %v -> %v (%s:%d), new freq: %d", 
+                                    update.Target.Name, update.Relate.Name, 
+                                    update.Source, update.Line, pair.Freq)
+                                break
+                            }
+                        }
+                        if !found {
+                            // 添加新记录
+                            f.ct.Mu.Lock()
+                            if f.ct.SyscallPair == nil {
+                                f.ct.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo)
+                            }
+                            f.ct.SyscallPair[update.Target] = append(f.ct.SyscallPair[update.Target], 
+                                &prog.SyscallPairInfo{
+                                    Relate:   update.Relate,
+                                    Verified: update.Verified,
+                                    Freq:     update.Freq,
+                                    Source:   update.Source,
+                                    Line:     update.Line,
+                                })
+                            f.ct.Mu.Unlock()
+                            newPairCount++
+                            f.Logf(0, "  -> [NEW] Added pair: %v -> %v (%s:%d)", 
+                                update.Target.Name, update.Relate.Name,
+                                update.Source, update.Line)
+                        }
+                    }
+                    
+                    f.Logf(0, "Update Summary:")
+                    f.Logf(0, "  - Verified existing pairs: %d", verifiedCount)
+                    f.Logf(0, "  - Added new pairs: %d", newPairCount)
+                    f.Logf(0, "------------[ Batch Update SyscallPair End ]------------")
+                }
+                tempPairMu.Unlock()
+            }
+        }()
+    })
+}
+
 func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Syscall][]uint64) {
+    // 确保更新线程已启动
+    f.startPairUpdater()
     // if len(p.Calls) != 7 {
     //     return
     // }
@@ -341,11 +433,17 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
 					for _, addr := range targetCovers {
 						src, line, _ := addrToConfigs(addr)
 						if src == pair.Source && line == pair.Line {
-							f.ct.Mu.Lock()
-                	    	pair.Verified = true
-                	    	pair.Freq++
-							f.ct.Mu.Unlock()
-                	    	f.Logf(0, "  -> [SUCCESS] Verified pair: %s -> %s (%s:%d found). New Freq: %d", sa.Name, sb.Name, pair.Source, pair.Line, pair.Freq)
+							tempPairMu.Lock()
+							tempPairUpdates = append(tempPairUpdates, TempSyscallPairUpdate{
+							    Target:   sa,
+							    Relate:   sb,
+							    Source:   pair.Source,
+							    Line:     pair.Line,
+							    Verified: true,
+							    Freq:     1,
+							})
+							tempPairMu.Unlock()
+                	    	// f.Logf(0, "  -> [SUCCESS] Verified pair: %s -> %s (%s:%d found). New Freq: %d", sa.Name, sb.Name, pair.Source, pair.Line, pair.Freq)
 							break
 						} else {
 							// 新逻辑：src/line不匹配时，判断是否为corpus新覆盖且未被SyscallPair记录
@@ -366,19 +464,17 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
 										}
 									}
 									if !already && src != "" && line != 0 {
-										f.ct.Mu.Lock()
-										if ct.SyscallPair == nil {
-											ct.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo)
-										}
-										ct.SyscallPair[sa] = append(ct.SyscallPair[sa], &prog.SyscallPairInfo{
-											Relate:   sb,
-											Verified: true,
-											Freq:     1,
-											Source:   src,
-											Line:     line,
+										tempPairMu.Lock()
+										tempPairUpdates = append(tempPairUpdates, TempSyscallPairUpdate{
+										    Target:   sa,
+										    Relate:   sb,
+										    Source:   src,
+										    Line:     line,
+										    Verified: true,
+										    Freq:     1,
 										})
-										f.ct.Mu.Unlock()
-										f.Logf(0, "  -> [NEW SOURCELINE] Added by new addr: %s -> %s (%s:%d)", sa.Name, sb.Name, src, line)
+										tempPairMu.Unlock()
+										// f.Logf(0, "  -> [NEW SOURCELINE] Added by new addr: %s -> %s (%s:%d)", sa.Name, sb.Name, src, line)
 									}
 								}
 							}
@@ -390,11 +486,17 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
 							for _, addr := range relateCovers {
 								src, line, _ := addrToConfigs(addr)
 								if src == pair.Source && line == pair.Line {
-									f.ct.Mu.Lock()
-                	    			pair.Verified = true
-                	    			pair.Freq++
-									f.ct.Mu.Unlock()
-                	    			f.Logf(0, "  -> [SUCCESS] Verified pair: %s -> %s (%s:%d found). New Freq: %d", sa.Name, sb.Name, pair.Source, pair.Line, pair.Freq)
+									tempPairMu.Lock()
+									tempPairUpdates = append(tempPairUpdates, TempSyscallPairUpdate{
+									    Target:   sa,
+									    Relate:   sb,
+									    Source:   pair.Source,
+									    Line:     pair.Line,
+									    Verified: true,
+									    Freq:     1,
+									})
+									tempPairMu.Unlock()
+                	    			// f.Logf(0, "  -> [SUCCESS] Verified pair: %s -> %s (%s:%d found). New Freq: %d", sa.Name, sb.Name, pair.Source, pair.Line, pair.Freq)
 									break
 								} else {
 									if f.Config != nil && f.Config.Corpus != nil {
@@ -414,19 +516,17 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
 												}
 											}
 											if !already && src != "" && line != 0 {
-												f.ct.Mu.Lock()
-												if ct.SyscallPair == nil {
-													ct.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo)
-												}
-												ct.SyscallPair[sa] = append(ct.SyscallPair[sa], &prog.SyscallPairInfo{
-													Relate:   sb,
-													Verified: true,
-													Freq:     1,
-													Source:   src,
-													Line:     line,
+												tempPairMu.Lock()
+												tempPairUpdates = append(tempPairUpdates, TempSyscallPairUpdate{
+												    Target:   sa,
+												    Relate:   sb,
+												    Source:   src,
+												    Line:     line,
+												    Verified: true,
+												    Freq:     1,
 												})
-												f.ct.Mu.Unlock()
-												f.Logf(0, "  -> [NEW SOURCELINE] Added by new addr: %s -> %s (%s:%d)", sa.Name, sb.Name, src, line)
+												tempPairMu.Unlock()
+												// f.Logf(0, "  -> [NEW SOURCELINE] Added by new addr: %s -> %s (%s:%d)", sa.Name, sb.Name, src, line)
 											}
 										}
 									}
@@ -491,32 +591,31 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
             }
         	for cfg, srcLinesA := range configsA {
         	    if srcLinesB, ok := configsB[cfg]; ok {
-        	        f.Logf(0, "  -> [NEW DISCOVERY] Found shared CONFIG '%s' between %s and %s", cfg, sa.Name, sb.Name)
-					f.ct.Mu.Lock()
-        	        if ct.SyscallPair == nil {
-        	            ct.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo)
-        	        }
+        	        // f.Logf(0, "  -> [NEW DISCOVERY] Found shared CONFIG '%s' between %s and %s", cfg, sa.Name, sb.Name)
+					tempPairMu.Lock()
         	        // 为 sa -> sb 添加所有相关 source:line
         	        for _, sl := range srcLinesA {
-        	            ct.SyscallPair[sa] = append(ct.SyscallPair[sa], &prog.SyscallPairInfo{
-        	                Relate:   sb,
-        	                Verified: false,
-        	                Freq:     0,
-        	                Source:   sl.Source,
-        	                Line:     sl.Line,
-        	            })
+						tempPairUpdates = append(tempPairUpdates, TempSyscallPairUpdate{
+						    Target:   sa,
+						    Relate:   sb,
+						    Source:   sl.Source,
+						    Line:     sl.Line,
+						    Verified: false,
+						    Freq:     0,
+						})
         	        }
         	        // 为 sb -> sa 添加所有相关 source:line
         	        for _, sl := range srcLinesB {
-        	            ct.SyscallPair[sb] = append(ct.SyscallPair[sb], &prog.SyscallPairInfo{
-        	                Relate:   sa,
-        	                Verified: false,
-        	                Freq:     0,
-        	                Source:   sl.Source,
-        	                Line:     sl.Line,
-        	            })
+						tempPairUpdates = append(tempPairUpdates, TempSyscallPairUpdate{
+						    Target:   sb,
+						    Relate:   sa,
+						    Source:   sl.Source,
+						    Line:     sl.Line,
+						    Verified: false,
+						    Freq:     0,
+						})
         	        }
-					f.ct.Mu.Unlock()
+					tempPairMu.Unlock()
         	    }
         	}
         }
