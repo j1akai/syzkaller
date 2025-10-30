@@ -151,7 +151,7 @@ func (f *Fuzzer) InjectSeedsFromSyscallPairJSON(jsonPath string) error {
     if ct == nil {
         return fmt.Errorf("choice table not ready")
     }
-    rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
+    // rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
     generated := make(map[string]bool)
     var seeds []*prog.Prog
     for _, dep := range deps {
@@ -186,17 +186,17 @@ func (f *Fuzzer) InjectSeedsFromSyscallPairJSON(jsonPath string) error {
 				// f.Logf(0, "Transforming address for pair %v->%v: origin=0x%x, now=0x%x", tname, rname, dep.Addr, finalAddr)
 
                 // 对每个系统调用对生成2个不同的种子程序
-                baseRnd := rnd.Int63() // 为这对系统调用生成一个基础随机数
-                for i := 0; i < 2; i++ {
-                    // 每次使用不同的种子初始化新的随机数生成器
-                    iterRnd := rand.New(rand.NewSource(baseRnd + int64(i)))
-                    p, err := prog.GenerateSeedFromSyscallPair(f.target, ct, tgt, rel, iterRnd)
-                    if err != nil {
-                        f.Logf(0, "failed to generate seed %d for %v->%v: %v", i+1, tname, rname, err)
-                        continue
-                    }
-                    seeds = append(seeds, p)
-                }
+                // baseRnd := rnd.Int63() // 为这对系统调用生成一个基础随机数
+                // for i := 0; i < 2; i++ {
+                //     // 每次使用不同的种子初始化新的随机数生成器
+                //     iterRnd := rand.New(rand.NewSource(baseRnd + int64(i)))
+                //     p, err := prog.GenerateSeedFromSyscallPair(f.target, ct, tgt, rel, iterRnd)
+                //     if err != nil {
+                //         f.Logf(0, "failed to generate seed %d for %v->%v: %v", i+1, tname, rname, err)
+                //         continue
+                //     }
+                //     seeds = append(seeds, p)
+                // }
             }
         }
     }
@@ -215,6 +215,13 @@ func (f *Fuzzer) InjectSeedsFromSyscallPairJSON(jsonPath string) error {
     f.AddCandidates(cands)
     f.Logf(0, "injected %d seeds from %s", len(seeds), jsonPath)
     return nil
+}
+
+func abs(x int) int {
+    if x < 0 {
+        return -x
+    }
+    return x
 }
 
 // normalizeSourcePath converts an absolute source path from addr2line to a relative path
@@ -434,7 +441,7 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
                 	// 检查 target syscall 的覆盖
 					for _, addr := range targetCovers {
 						src, line, _ := addrToConfigs(addr)
-						if src == pair.Source && line == pair.Line {
+						if src == pair.Source && abs(line-pair.Line) <= 20 {
 							tempPairMu.Lock()
 							tempPairUpdates = append(tempPairUpdates, TempSyscallPairUpdate{
 							    Target:   sa,
@@ -487,7 +494,7 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
 						if relateCovers, ok := allCover[sb]; ok {
 							for _, addr := range relateCovers {
 								src, line, _ := addrToConfigs(addr)
-								if src == pair.Source && line == pair.Line {
+								if src == pair.Source && abs(line-pair.Line) <= 20 {
 									tempPairMu.Lock()
 									tempPairUpdates = append(tempPairUpdates, TempSyscallPairUpdate{
 									    Target:   sa,
