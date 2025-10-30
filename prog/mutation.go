@@ -141,7 +141,7 @@ func (ctx *mutator) insertCallWithDependency() bool {
     // 候选集键为 *Syscall，值为权重（int）
     candidates := make(map[*Syscall]int)
 	
-	ctx.ct.Mu.Lock()
+	ctx.ct.Mu.RLock()
     // 如果没有SyscallPair信息，直接回退到随机插入
     if ctx.ct == nil || ctx.ct.SyscallPair == nil || len(ctx.ct.SyscallPair) == 0 {
         calls := r.generateCall(s, p, idx)
@@ -184,7 +184,7 @@ func (ctx *mutator) insertCallWithDependency() bool {
             }
         }
     }
-    ctx.ct.Mu.Unlock()
+    ctx.ct.Mu.RUnlock()
     // 如果候选集为空，退回到随机插入（不使用依赖）
     if len(candidates) == 0 {
         calls := r.generateCall(s, p, idx)
