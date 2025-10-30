@@ -318,7 +318,6 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
 		}
 	}
 
-	f.ct.Mu.Lock()
     // 1. 先做已有pair的验证
     // f.Logf(0, "\n-> Phase 1: Verifying existing syscall pairs...")
     for i := 0; i < len(calls); i++ {
@@ -342,8 +341,10 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
 					for _, addr := range targetCovers {
 						src, line, _ := addrToConfigs(addr)
 						if src == pair.Source && line == pair.Line {
+							f.ct.Mu.Lock()
                 	    	pair.Verified = true
                 	    	pair.Freq++
+							f.ct.Mu.Unlock()
                 	    	f.Logf(0, "  -> [SUCCESS] Verified pair: %s -> %s (%s:%d found). New Freq: %d", sa.Name, sb.Name, pair.Source, pair.Line, pair.Freq)
 							break
 						} else {
@@ -365,6 +366,7 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
 										}
 									}
 									if !already && src != "" && line != 0 {
+										f.ct.Mu.Lock()
 										if ct.SyscallPair == nil {
 											ct.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo)
 										}
@@ -375,6 +377,7 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
 											Source:   src,
 											Line:     line,
 										})
+										f.ct.Mu.Unlock()
 										f.Logf(0, "  -> [NEW SOURCELINE] Added by new addr: %s -> %s (%s:%d)", sa.Name, sb.Name, src, line)
 									}
 								}
@@ -387,8 +390,10 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
 							for _, addr := range relateCovers {
 								src, line, _ := addrToConfigs(addr)
 								if src == pair.Source && line == pair.Line {
+									f.ct.Mu.Lock()
                 	    			pair.Verified = true
                 	    			pair.Freq++
+									f.ct.Mu.Unlock()
                 	    			f.Logf(0, "  -> [SUCCESS] Verified pair: %s -> %s (%s:%d found). New Freq: %d", sa.Name, sb.Name, pair.Source, pair.Line, pair.Freq)
 									break
 								} else {
@@ -409,6 +414,7 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
 												}
 											}
 											if !already && src != "" && line != 0 {
+												f.ct.Mu.Lock()
 												if ct.SyscallPair == nil {
 													ct.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo)
 												}
@@ -419,6 +425,7 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
 													Source:   src,
 													Line:     line,
 												})
+												f.ct.Mu.Unlock()
 												f.Logf(0, "  -> [NEW SOURCELINE] Added by new addr: %s -> %s (%s:%d)", sa.Name, sb.Name, src, line)
 											}
 										}
@@ -431,7 +438,6 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
             }
         }
     }
-	f.ct.Mu.Unlock()
 
     // 2. 自动发现新pair
     // f.Logf(0, "\n-> Phase 2: Discovering new pairs from shared CONFIGs...")
@@ -458,7 +464,6 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
 	    }
 	}
 
-	f.ct.Mu.Lock()
     // 任意两个call，若有config交集且不在SyscallPair里，则插入
     for i := 0; i < len(calls); i++ {
         sa := calls[i].Meta
@@ -487,6 +492,7 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
         	for cfg, srcLinesA := range configsA {
         	    if srcLinesB, ok := configsB[cfg]; ok {
         	        f.Logf(0, "  -> [NEW DISCOVERY] Found shared CONFIG '%s' between %s and %s", cfg, sa.Name, sb.Name)
+					f.ct.Mu.Lock()
         	        if ct.SyscallPair == nil {
         	            ct.SyscallPair = make(map[*prog.Syscall][]*prog.SyscallPairInfo)
         	        }
@@ -510,11 +516,11 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
         	                Line:     sl.Line,
         	            })
         	        }
+					f.ct.Mu.Unlock()
         	    }
         	}
         }
     }
-	f.ct.Mu.Unlock()
     // f.Logf(0, "------------[ UpdateSyscallPairFromProg End ]--------------")
 }
 

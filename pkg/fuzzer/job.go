@@ -180,7 +180,7 @@ func (job *triageJob) run(fuzzer *Fuzzer) {
 	wg.Wait()
 }
 
-var updatePairSem = make(chan struct{}, 3) // 最多3个并发任务
+var updatePairSem = make(chan struct{}, 1) // 最多3个并发任务
 
 func (job *triageJob) handleCall(call int, info *triageCall, allCover map[*prog.Syscall][]uint64) {
 	if info.newStableSignal.Empty() {
