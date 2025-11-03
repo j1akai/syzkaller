@@ -236,6 +236,7 @@ type Config struct {
 	SourceLine2ConfigJSON string `json:"sourceline2config_json,omitempty"`
 	ConfigTreeJSON       string `json:"configtree_json,omitempty"`
 	VmlinuxPath          string `json:"vmlinux_path,omitempty"`
+	CorpusInfoDir        string `json:"corpus_info_dir,omitempty"`
 }
 
 // These options are not guaranteed to be backward/forward compatible and
