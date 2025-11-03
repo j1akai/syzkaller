@@ -235,7 +235,7 @@ func normalizeSourcePath(absPath string) string {
     // The heuristic is to find the first occurrence of "/linux/" which is assumed to be
     // the kernel source root directory. This is more robust than LastIndex due to
     // subdirectories like "include/linux".
-    const marker = "/linux/"
+    const marker = "/linux-riscv-for-linus-6.18-rc3/"
     if idx := strings.Index(cleanedPath, marker); idx != -1 {
         // The relative path starts after the marker.
         return cleanedPath[idx+len(marker):]
@@ -561,6 +561,13 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
 	    }
 	    for _, addr := range addrs {
 	        src, line, configs := addrToConfigs(addr)
+			// Match "arch/riscv/" anywhere in the path, not just at the start.
+			// Some paths may include prefixes (e.g., full absolute paths or
+			// different root prefixes), so Contains is more robust here.
+			if strings.Contains(src, "arch/riscv/") {
+				prog.AddRiscvSyscall(sa)
+				f.Logf(0, "riscv-detect: syscall %s (target) -> %s:%d", sa.Name, src, line)
+			}
 	        if src == "" || line == 0 {
 	            continue
 	        }

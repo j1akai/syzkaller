@@ -37,7 +37,8 @@ var DefaultMutateOpts = MutateOpts{
 	InsertWeight:     100,
 	MutateArgWeight:  100,
 	RemoveCallWeight: 10,
-	InsertWithDependencyWeight: 200,
+	InsertWithDependencyWeight: 100,
+	InsertRiscvWeight: 150,
 }
 
 type MutateOpts struct {
@@ -49,10 +50,11 @@ type MutateOpts struct {
 	MutateArgWeight    int
 	RemoveCallWeight   int
 	InsertWithDependencyWeight int
+	InsertRiscvWeight int
 }
 
 func (o MutateOpts) weight() int {
-	return o.SquashWeight + o.SpliceWeight + o.InsertWeight + o.MutateArgWeight + o.RemoveCallWeight + o.InsertWithDependencyWeight
+	return o.SquashWeight + o.SpliceWeight + o.InsertWeight + o.MutateArgWeight + o.RemoveCallWeight + o.InsertWithDependencyWeight + o.InsertRiscvWeight
 }
 
 func (p *Prog) MutateWithOpts(rs rand.Source, ncalls int, ct *ChoiceTable, noMutate map[int]bool,
@@ -74,6 +76,11 @@ func (p *Prog) MutateWithOpts(rs rand.Source, ncalls int, ct *ChoiceTable, noMut
 	}
 	for stop, ok := false, false; !stop; stop = ok && len(p.Calls) != 0 && r.oneOf(opts.ExpectedIterations) {
 		val := r.Intn(totalWeight)
+		val -= opts.InsertRiscvWeight
+		if val < 0 {
+			ok = ctx.insertRiscvCalls()
+			continue
+		}
 		val -= opts.InsertWithDependencyWeight
 		if val < 0 {
 			ok = ctx.insertCallWithDependency()
@@ -120,6 +127,63 @@ type mutator struct {
 	noMutate map[int]bool // Set of IDs of syscalls which should not be mutated.
 	corpus   []*Prog      // The entire corpus, including original program p.
 	opts     MutateOpts
+}
+
+
+
+// 新增：在随机位置插入若干 riscv syscall（如果全局注册表中有）
+func (ctx *mutator) insertRiscvCalls() bool {
+    p, r := ctx.p, ctx.r
+    if len(p.Calls) >= ctx.ncalls {
+        return false
+    }
+    // 随机插位置
+    idx := r.Intn(len(p.Calls) + 1)
+    var c *Call
+    if idx < len(p.Calls) {
+        c = p.Calls[idx]
+    }
+    s := analyze(ctx.ct, ctx.corpus, p, c)
+
+    list := GetRiscvSyscalls()
+	// Filter out disabled or NoGenerate syscalls to avoid generateParticularCall panics.
+	var candidates []*Syscall
+	for _, sc := range list {
+		if sc == nil || sc.Attrs.Disabled || sc.Attrs.NoGenerate {
+			continue
+		}
+		candidates = append(candidates, sc)
+	}
+	if len(candidates) == 0 {
+        // 没有 riscv 系统调用，回退到普通插入
+		calls := r.generateCall(s, p, idx)
+        p.insertBefore(c, calls)
+        for len(p.Calls) > ctx.ncalls {
+            p.RemoveCall(idx)
+        }
+        return true
+    }
+    // 随机插入 1..3 个 riscv syscall（受剩余可插入空间限制）
+    remaining := ctx.ncalls - len(p.Calls)
+    if remaining <= 0 {
+        return false
+    }
+    maxIns := 7
+    if remaining < maxIns {
+        maxIns = remaining
+    }
+    cnt := 1 + r.Intn(maxIns)
+	for k := 0; k < cnt; k++ {
+		sc := candidates[r.Intn(len(candidates))]
+		// generateParticularCall panics if the syscall is NoGenerate/Disabled,
+		// but we filtered candidates above, so this should be safe.
+		calls := r.generateParticularCall(s, sc)
+        p.insertBefore(c, calls)
+        for len(p.Calls) > ctx.ncalls {
+            p.RemoveCall(idx)
+        }
+    }
+    return true
 }
 
 func (ctx *mutator) insertCallWithDependency() bool {
