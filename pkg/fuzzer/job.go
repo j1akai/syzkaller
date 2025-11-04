@@ -257,54 +257,54 @@ func (job *triageJob) handleCall(call int, info *triageCall, allCover map[*prog.
 	}()
 
 	// 启动单独的 goroutine，把 p 和 newAllCover（或回退到 allCover）写入本地文件
-	go func(pw *prog.Prog, covers map[*prog.Syscall][]uint64) {
-		// 如果仍然没有覆盖信息，则不创建文件
-		if len(covers) == 0 {
-			return
-		}
-		// 计算 hash id（与 corpus.Save 使用的相同方法）
-		progData := pw.Serialize()
-		sig := hash.String(progData)
+	// go func(pw *prog.Prog, covers map[*prog.Syscall][]uint64) {
+	// 	// 如果仍然没有覆盖信息，则不创建文件
+	// 	if len(covers) == 0 {
+	// 		return
+	// 	}
+	// 	// 计算 hash id（与 corpus.Save 使用的相同方法）
+	// 	progData := pw.Serialize()
+	// 	sig := hash.String(progData)
 
-		// 确保输出目录存在，并写入文件到该目录
-		outDir := "/home/jiakai/vini/kconfigfuzz-corpus/corpus-info"
-		if err := os.MkdirAll(outDir, 0755); err != nil {
-			if job.fuzzer != nil {
-				job.fuzzer.Logf(0, "failed to create output dir %s: %v", outDir, err)
-			}
-			// 仍然尝试写到 cwd
-			outDir = ""
-		}
+	// 	// 确保输出目录存在，并写入文件到该目录
+	// 	outDir := "/home/jiakai/vini/kconfigfuzz-corpus/corpus-info"
+	// 	if err := os.MkdirAll(outDir, 0755); err != nil {
+	// 		if job.fuzzer != nil {
+	// 			job.fuzzer.Logf(0, "failed to create output dir %s: %v", outDir, err)
+	// 		}
+	// 		// 仍然尝试写到 cwd
+	// 		outDir = ""
+	// 	}
 
-		// 收集所有地址并去重、排序，然后写入单个文件，文件名为 <sig>，每行一个地址（0x...）
-		addrsMap := make(map[uint64]struct{})
-		for _, addrs := range covers {
-			for _, a := range addrs {
-				addrsMap[a] = struct{}{}
-			}
-		}
-		if len(addrsMap) == 0 {
-			return
-		}
-		addrsSlice := make([]uint64, 0, len(addrsMap))
-		for a := range addrsMap {
-			addrsSlice = append(addrsSlice, a)
-		}
-		sort.Slice(addrsSlice, func(i, j int) bool { return addrsSlice[i] < addrsSlice[j] })
-		var sb2 strings.Builder
-		for _, a := range addrsSlice {
-			fmt.Fprintf(&sb2, "0x%x\n", a)
-		}
-		fname := sig
-		if outDir != "" {
-			fname = filepath.Join(outDir, fname)
-		}
-		if err := os.WriteFile(fname, []byte(sb2.String()), 0644); err != nil {
-			if job.fuzzer != nil {
-				job.fuzzer.Logf(0, "failed to write seed addr file %s: %v", fname, err)
-			}
-		}
-	}(p.Clone(), newAllCover)
+	// 	// 收集所有地址并去重、排序，然后写入单个文件，文件名为 <sig>，每行一个地址（0x...）
+	// 	addrsMap := make(map[uint64]struct{})
+	// 	for _, addrs := range covers {
+	// 		for _, a := range addrs {
+	// 			addrsMap[a] = struct{}{}
+	// 		}
+	// 	}
+	// 	if len(addrsMap) == 0 {
+	// 		return
+	// 	}
+	// 	addrsSlice := make([]uint64, 0, len(addrsMap))
+	// 	for a := range addrsMap {
+	// 		addrsSlice = append(addrsSlice, a)
+	// 	}
+	// 	sort.Slice(addrsSlice, func(i, j int) bool { return addrsSlice[i] < addrsSlice[j] })
+	// 	var sb2 strings.Builder
+	// 	for _, a := range addrsSlice {
+	// 		fmt.Fprintf(&sb2, "0x%x\n", a)
+	// 	}
+	// 	fname := sig
+	// 	if outDir != "" {
+	// 		fname = filepath.Join(outDir, fname)
+	// 	}
+	// 	if err := os.WriteFile(fname, []byte(sb2.String()), 0644); err != nil {
+	// 		if job.fuzzer != nil {
+	// 			job.fuzzer.Logf(0, "failed to write seed addr file %s: %v", fname, err)
+	// 		}
+	// 	}
+	// }(p.Clone(), newAllCover)
 }
 
 func (job *triageJob) deflake(exec func(*queue.Request, ProgFlags) *queue.Result) (stop bool) {

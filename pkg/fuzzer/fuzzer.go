@@ -154,6 +154,7 @@ func (f *Fuzzer) InjectSeedsFromSyscallPairJSON(jsonPath string) error {
     rnd := rand.New(rand.NewSource(time.Now().UnixNano()))
     generated := make(map[string]bool)
     var seeds []*prog.Prog
+	oneIn := 2
     for _, dep := range deps {
 		relSource := normalizeSourcePath(dep.Source) // 转为相对路径
         for _, tname := range dep.Targets {
@@ -184,10 +185,12 @@ func (f *Fuzzer) InjectSeedsFromSyscallPairJSON(jsonPath string) error {
                     Line:     dep.Line,
                 })
 				// f.Logf(0, "Transforming address for pair %v->%v: origin=0x%x, now=0x%x", tname, rname, dep.Addr, finalAddr)
-
+				if oneIn > 1 && rnd.Intn(oneIn) != 0 {
+					continue
+				}
                 // 对每个系统调用对生成2个不同的种子程序
                 baseRnd := rnd.Int63() // 为这对系统调用生成一个基础随机数
-                for i := 0; i < 2; i++ {
+                for i := 0; i < 1; i++ {
                     // 每次使用不同的种子初始化新的随机数生成器
                     iterRnd := rand.New(rand.NewSource(baseRnd + int64(i)))
                     p, err := prog.GenerateSeedFromSyscallPair(f.target, ct, tgt, rel, iterRnd)
@@ -294,14 +297,16 @@ func (f *Fuzzer) UpdateSyscallPairFromProg(p *prog.Prog, allCover map[*prog.Sysc
         src := line[:idx]
         lineno, _ := strconv.Atoi(strings.TrimSpace(line[idx+1:]))
         rel := normalizeSourcePath(src)
-        var configs []string
-        if ranges, ok := f.SourceLineToConfig[rel]; ok {
-            for _, r := range ranges {
-                if lineno >= r.StartLine && lineno <= r.EndLine {
-                    configs = append(configs, r.Configs...)
-                }
-            }
-        }
+		var configs []string
+		if ranges, ok := f.SourceLineToConfig[rel]; ok {
+			for _, r := range ranges {
+				// If StartLine and EndLine are both 0, treat the range as
+				// applying to the whole file (match any lineno).
+				if (r.StartLine == 0 && r.EndLine == 0) || (lineno >= r.StartLine && lineno <= r.EndLine) {
+					configs = append(configs, r.Configs...)
+				}
+			}
+		}
         // 日志 4: 打印 addr2line 的结果
         if len(configs) > 0 {
             // f.Logf(0, "  -> Addr 0x%x -> %s:%d -> CONFIGs: [%s]", addr, rel, lineno, strings.Join(configs, ", "))
